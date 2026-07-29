@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# 环境变量与密钥（勿提交）
+.env
+.env.local
+*.pem
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# 构建与分发
+dist/
+build/
+*.egg-info/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志与临时文件
+*.log
+tmp/
+temp/
+uploads/
