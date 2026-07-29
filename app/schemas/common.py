@@ -4,7 +4,10 @@ from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field
 
+from app.core.config import get_settings
+
 T = TypeVar("T")
+settings = get_settings()
 
 
 class ApiResponse(BaseModel, Generic[T]):
@@ -19,8 +22,8 @@ class HealthData(BaseModel):
     """健康检查返回数据。"""
 
     status: str = "ok"
-    service: str = "dev-smart-assistant-backend"
-    version: str = "0.1.0"
+    service: str = settings.app_name
+    version: str = settings.app_version
 
 
 class ModuleStatus(BaseModel):

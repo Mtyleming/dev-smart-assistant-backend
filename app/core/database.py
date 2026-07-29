@@ -18,7 +18,8 @@ engine = create_async_engine(
     settings.database_url,
     pool_size=20,
     max_overflow=10,
-    echo=settings.app_debug,
+    pool_recycle=1800,
+    echo=False
 )
 
 # 会话工厂：每个请求独立会话，提交后不过期对象
