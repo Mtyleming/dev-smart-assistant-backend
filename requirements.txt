@@ -1,0 +1,22 @@
+# 开发智能助手 · 后端依赖
+# 版本约束来自 04a-后端技术选型.md
+
+# Web 框架（固定 0.137.x）
+fastapi>=0.137.0,<0.138.0
+uvicorn[standard]>=0.34.0,<0.40.0
+
+# 数据校验与配置
+pydantic>=2.10.0,<3.0.0
+pydantic-settings>=2.7.0,<3.0.0
+
+# ORM（固定 2.0.x）+ MySQL 异步驱动
+sqlalchemy[asyncio]>=2.0.0,<2.1.0
+aiomysql>=0.2.0,<0.3.0
+alembic>=1.14.0,<2.0.0
+
+# 缓存
+redis>=5.2.0,<6.0.0
+
+# 工具
+python-dotenv>=1.0.0,<2.0.0
+httpx>=0.28.0,<1.0.0
