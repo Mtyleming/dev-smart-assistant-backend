@@ -28,6 +28,13 @@ class NotFoundError(AppException):
         super().__init__(code=40400, message=message, status_code=404)
 
 
+class ConflictError(AppException):
+    """资源冲突，如用户名或邮箱已存在。"""
+
+    def __init__(self, message: str = "资源冲突"):
+        super().__init__(code=40900, message=message, status_code=409)
+
+
 async def app_exception_handler(request: Request, exc: AppException):
     """全局业务异常处理器，返回统一 JSON 结构。"""
     _ = request

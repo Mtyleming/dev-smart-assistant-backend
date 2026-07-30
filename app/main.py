@@ -12,7 +12,8 @@ from app.core.exceptions import AppException, app_exception_handler, global_exce
 from app.core.redis import redis_client
 import app.models  # noqa: F401  注册 ORM 模型到 Base.metadata
 from app.routers import (
-    health
+    auth,
+    health,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,4 +60,5 @@ app.add_exception_handler(Exception, global_exception_handler)
 
 # 健康检查
 app.include_router(health.router)
+app.include_router(auth.router)
 

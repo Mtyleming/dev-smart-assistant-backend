@@ -3,13 +3,16 @@
 from typing import Annotated, Any
 
 from fastapi import Depends, Header, HTTPException, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
 from app.core.exceptions import UnauthorizedError
+from app.core.redis import get_redis
 
 # 类型别名：路由里直接写 DbSession / CurrentUser 更清晰
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
+RedisClient = Annotated[Redis | None, Depends(get_redis)]
 
 
 async def get_current_user(

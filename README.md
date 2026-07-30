@@ -114,6 +114,7 @@ app/
 | 模块 | 前缀 | 说明 |
 |------|------|------|
 | 健康检查 | `/health` | 服务是否活着 |
+| 认证 | `/api/v1/auth` | 注册、登录等 |
 | 用户 | `/api/v1/users` | 用户资料等 |
 | 团队 | `/api/v1/teams` | 团队管理 |
 | 知识库 | `/api/v1/knowledge-bases` | 知识库列表等 |
@@ -141,6 +142,77 @@ Authorization: Bearer demo-token
   "data": {}
 }
 ```
+
+### 用户注册 `POST /api/v1/auth/register`
+
+请求体：
+
+```json
+{
+  "username": "alice",
+  "email": "alice@example.com",
+  "password": "your-password"
+}
+```
+
+- `username`：3–50 字符
+- `email`：合法邮箱格式
+- `password`：非空（强度校验由前端负责）
+
+成功响应 `201`，`data` 示例：
+
+```json
+{
+  "access_token": "<jwt>",
+  "refresh_token": "<jwt>",
+  "user": {
+    "id": 1,
+    "username": "alice",
+    "email": "alice@example.com",
+    "team_id": 1,
+    "role": "admin",
+    "is_active": true
+  }
+}
+```
+
+- Access Token 有效期 2 小时，Refresh Token 7 天
+- 用户名或邮箱已存在时返回 `409 Conflict`
+
+### 用户登录 `POST /api/v1/auth/login`
+
+请求体：
+
+```json
+{
+  "number": "alice",
+  "password": "your-password"
+}
+```
+
+- `number`：用户名或邮箱
+- `password`：非空
+
+成功响应 `200`，`data` 结构与注册接口相同。
+
+- 用户不存在时返回 `404`，message 为「用户不存在」
+- 密码错误时返回 `401`，message 为「密码错误」
+
+### Token 续期 `POST /api/v1/auth/refresh`
+
+请求体：
+
+```json
+{
+  "refresh_token": "<jwt>"
+}
+```
+
+成功响应 `200`，`data` 结构与登录接口相同（新的双 Token + 用户基本信息）。
+
+- Refresh Token 无效或已过期时返回 `401`
+- jti 已在黑名单 `session:blacklist:{jti}` 中时返回 `401`
+- 续期成功后，旧 Refresh Token 的 jti 会写入黑名单，TTL 为其剩余有效期
 
 ---
 

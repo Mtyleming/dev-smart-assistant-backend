@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     access_token_expire: int = 7200
     # Refresh Token 有效期（秒）
     refresh_token_expire: int = 604800
+    # 登录会话 Redis TTL（秒），滑动过期
+    login_session_ttl: int = 1800
     # 百炼平台 API Key
     bailian_api_key: str = ""
     # 应用版本号
