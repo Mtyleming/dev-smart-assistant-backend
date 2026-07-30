@@ -6,6 +6,7 @@ import jwt
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth_token import parse_access_token
 from app.core.config import settings
 from app.core.exceptions import ConflictError, NotFoundError, UnauthorizedError, AppException
 from app.core.security import (
@@ -23,6 +24,7 @@ from app.repositories.user_repo import user_repo
 from app.schemas.auth import (
     AuthData,
     LoginRequest,
+    MeData,
     RefreshRequest,
     RegisterRequest,
     UserBasicInfo,
@@ -158,6 +160,45 @@ class AuthService:
         auth_data = await self._issue_auth_data(redis, user)
         await cache_repo.add_token_to_blacklist(redis, jti, remaining_ttl)
         return auth_data
+
+    async def logout(
+        self,
+        redis: Redis | None,
+        user_id: str,
+        access_token: str,
+    ) -> None:
+        """用户登出：将 Access Token 加入黑名单并清除登录会话。
+
+        Args:
+            redis: Redis 客户端。
+            user_id: 当前用户 ID。
+            access_token: 当前请求的 Access Token。
+
+        Raises:
+            UnauthorizedError: Token 无效或 Redis 不可用。
+        """
+        if redis is None:
+            raise UnauthorizedError("登出失败，请稍后重试")
+
+        payload = parse_access_token(access_token)
+        jti = payload["jti"]
+        remaining_ttl = get_token_remaining_seconds(payload)
+        await cache_repo.add_token_to_blacklist(redis, jti, remaining_ttl)
+        await cache_repo.delete_login_session(redis, user_id)
+
+    async def get_me(self, db: AsyncSession, user_id: str) -> MeData:
+        """根据 Token 中的 user_id 查询当前用户信息。"""
+        user = await user_repo.get_by_id(db, int(user_id))
+        if not user:
+            raise NotFoundError("用户不存在")
+
+        return MeData(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            role=user.role.value,
+            team_id=user.team_id,
+        )
 
     async def _issue_auth_data(self, redis: Redis | None, user: User) -> AuthData:
         """签发双 Token、写入 Redis 会话并组装响应。"""

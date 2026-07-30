@@ -128,10 +128,12 @@ app/
 需要登录的接口，请求头加上：
 
 ```text
-Authorization: Bearer demo-token
+Authorization: Bearer <access_token>
 ```
 
-（当前为开发占位鉴权，任意非空 token 都会变成演示用户。）
+鉴权中间件会校验 Token 签名、有效期、黑名单及 Redis 登录态，并将 `user_id`、`team_id`、`role` 注入 `request.state`；同时滑动刷新 `session:login:{user_id}` 的 TTL（默认 30 分钟）。
+
+以下路径无需 Token：`/health`、`/docs`、`/api/v1/auth/register|login|refresh`、各模块 `/status`。
 
 统一响应格式：
 
@@ -198,6 +200,22 @@ Authorization: Bearer demo-token
 - 用户不存在时返回 `404`，message 为「用户不存在」
 - 密码错误时返回 `401`，message 为「密码错误」
 
+### 获取当前用户 `GET /api/v1/auth/me`
+
+无请求参数，请求头需携带 `Authorization: Bearer <access_token>`。
+
+成功响应 `data` 示例：
+
+```json
+{
+  "id": 1,
+  "username": "alice",
+  "email": "alice@example.com",
+  "role": "admin",
+  "team_id": 1
+}
+```
+
 ### Token 续期 `POST /api/v1/auth/refresh`
 
 请求体：
@@ -213,6 +231,23 @@ Authorization: Bearer demo-token
 - Refresh Token 无效或已过期时返回 `401`
 - jti 已在黑名单 `session:blacklist:{jti}` 中时返回 `401`
 - 续期成功后，旧 Refresh Token 的 jti 会写入黑名单，TTL 为其剩余有效期
+
+### 用户登出 `POST /api/v1/auth/logout`
+
+请求头需携带 `Authorization: Bearer <access_token>`。
+
+成功响应：
+
+```json
+{
+  "code": 0,
+  "message": "登出成功",
+  "data": null
+}
+```
+
+- 将当前 Access Token 的 `jti` 写入黑名单，TTL 为剩余有效期
+- 删除 Redis `session:login:{user_id}`
 
 ---
 

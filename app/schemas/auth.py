@@ -35,6 +35,16 @@ class UserBasicInfo(BaseModel):
     is_active: bool
 
 
+class MeData(BaseModel):
+    """当前登录用户信息。"""
+
+    id: int
+    username: str
+    email: str
+    role: str
+    team_id: int
+
+
 class AuthData(BaseModel):
     """注册/登录成功后的认证数据。"""
 

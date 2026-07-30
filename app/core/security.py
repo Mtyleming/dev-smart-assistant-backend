@@ -36,6 +36,11 @@ def decode_refresh_token(token: str) -> dict:
     return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
 
 
+def decode_access_token(token: str) -> dict:
+    """解码并校验 Access Token 签名与有效期。"""
+    return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+
+
 def get_token_remaining_seconds(payload: dict) -> int:
     """计算 Token 剩余有效秒数。"""
     exp = payload.get("exp")

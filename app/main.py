@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.database import Base, engine
 from app.core.exceptions import AppException, app_exception_handler, global_exception_handler
 from app.core.redis import redis_client
+from app.middleware.auth_middleware import AuthMiddleware
 import app.models  # noqa: F401  注册 ORM 模型到 Base.metadata
 from app.routers import (
     auth,
@@ -54,6 +55,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AuthMiddleware)
 
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)

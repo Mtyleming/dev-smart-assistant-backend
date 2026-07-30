@@ -2,10 +2,11 @@
 
 from typing import Annotated, Any
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth_token import extract_bearer_token
 from app.core.database import get_db_session
 from app.core.exceptions import UnauthorizedError
 from app.core.redis import get_redis
@@ -15,39 +16,31 @@ DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 RedisClient = Annotated[Redis | None, Depends(get_redis)]
 
 
-async def get_current_user(
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
-    """
-    从 Authorization 头解析当前用户（开发阶段占位）。
+async def get_current_user(request: Request) -> dict[str, Any]:
+    """从 request.state 读取鉴权中间件注入的当前用户上下文。"""
+    user_id = getattr(request.state, "user_id", None)
+    team_id = getattr(request.state, "team_id", None)
+    role = getattr(request.state, "role", None)
 
-    正式环境应校验 JWT / Session；当前仅保证依赖注入链路可用。
-    约定：Authorization: Bearer demo-token
-    """
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="缺少 Authorization 头",
-        )
-
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization 格式应为 Bearer <token>",
-        )
-
-    # 开发占位：任意非空 token 都视为演示用户
-    if token.strip() == "":
-        raise UnauthorizedError("Token 无效")
+    if not user_id or not team_id or not role:
+        raise UnauthorizedError("未授权")
 
     return {
-        "id": "demo-user-id",
-        "username": "demo",
-        "display_name": "演示用户",
-        "team_id": "demo-team-id",
-        "accessible_kb_ids": [],
+        "id": user_id,
+        "team_id": team_id,
+        "role": role,
     }
 
 
 CurrentUser = Annotated[dict[str, Any], Depends(get_current_user)]
+
+
+async def get_access_token(request: Request) -> str:
+    """获取当前请求的 Access Token（优先读中间件注入的 state）。"""
+    token = getattr(request.state, "access_token", None)
+    if token:
+        return token
+    return extract_bearer_token(request.headers.get("Authorization"))
+
+
+AccessToken = Annotated[str, Depends(get_access_token)]
