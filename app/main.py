@@ -13,6 +13,7 @@ from app.core.redis import redis_client
 from app.middleware.auth_middleware import AuthMiddleware
 import app.models  # noqa: F401  注册 ORM 模型到 Base.metadata
 from app.routers import (
+    admin,
     auth,
     health,
     teams,
@@ -65,4 +66,5 @@ app.add_exception_handler(Exception, global_exception_handler)
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(teams.router)
+app.include_router(admin.router)
 

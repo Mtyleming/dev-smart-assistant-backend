@@ -24,6 +24,12 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(..., min_length=1, description="Refresh Token")
 
 
+class SwitchTeamRequest(BaseModel):
+    """切换当前团队请求体。"""
+
+    team_id: int = Field(..., description="目标团队 ID")
+
+
 class UserBasicInfo(BaseModel):
     """用户基本信息（不含密码）。"""
 
@@ -43,6 +49,7 @@ class MeData(BaseModel):
     email: str
     role: str
     team_id: int
+    is_super_admin: bool = False
 
 
 class AuthData(BaseModel):

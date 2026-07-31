@@ -3,7 +3,7 @@
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.base_models import User
+from app.models.base_models import TeamMember, User
 
 
 class UserRepository:
@@ -47,6 +47,22 @@ class UserRepository:
         db.add(user)
         await db.flush()
         return user
+
+    async def update_is_active(
+        self, db: AsyncSession, user: User, is_active: bool
+    ) -> User:
+        """更新用户启用状态。"""
+        user.is_active = is_active
+        await db.flush()
+        return user
+
+    async def list_unassigned(self, db: AsyncSession) -> list[User]:
+        """查询未加入任何团队的用户。"""
+        assigned_user_ids = select(TeamMember.user_id).distinct()
+        result = await db.execute(
+            select(User).where(User.id.not_in(assigned_user_ids)).order_by(User.id.asc())
+        )
+        return list(result.scalars().all())
 
 
 user_repo = UserRepository()

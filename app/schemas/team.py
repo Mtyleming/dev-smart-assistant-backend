@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from app.models.base_models import TeamMemberRole
+
 
 class TeamCreateRequest(BaseModel):
     """创建团队请求体。"""
@@ -24,6 +26,15 @@ class TeamBriefData(BaseModel):
     name: str
 
 
+class UserTeamData(BaseModel):
+    """当前用户所属团队（用于切换团队）。"""
+
+    id: int
+    name: str
+    role: str
+    is_current: bool = Field(..., description="是否为 Token 中的当前团队")
+
+
 class TeamDetailData(BaseModel):
     """团队详情。"""
 
@@ -39,3 +50,9 @@ class TeamMemberData(BaseModel):
     id: int
     username: str
     role: str
+
+
+class AssignMemberRoleRequest(BaseModel):
+    """分配成员角色请求体。"""
+
+    role: TeamMemberRole = Field(..., description="新角色：admin / tech_lead / developer")

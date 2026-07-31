@@ -2,6 +2,11 @@
 
 from redis.asyncio import Redis
 
+# 邀请码有效期 7 天
+INVITE_CODE_TTL_SECONDS = 604800
+# 入团审批记录保留 30 天
+JOIN_REQUEST_TTL_SECONDS = 30 * 24 * 3600
+
 
 class CacheRepository:
     """缓存读写，不包含业务判断。"""
@@ -43,6 +48,69 @@ class CacheRepository:
     async def delete_login_session(self, redis: Redis, user_id: str) -> None:
         """删除用户登录会话。"""
         await redis.delete(f"session:login:{user_id}")
+
+    async def set_invite_code(
+        self,
+        redis: Redis,
+        code: str,
+        data: dict[str, str],
+        ttl_seconds: int = INVITE_CODE_TTL_SECONDS,
+    ) -> None:
+        """写入邀请码 Hash 并设置 TTL。"""
+        key = f"invite:code:{code}"
+        await redis.hset(key, mapping=data)
+        await redis.expire(key, ttl_seconds)
+
+    async def get_invite_code(self, redis: Redis, code: str) -> dict[str, str] | None:
+        """获取邀请码数据，不存在时返回 None。"""
+        data = await redis.hgetall(f"invite:code:{code}")
+        return data if data else None
+
+    async def delete_invite_code(self, redis: Redis, code: str) -> None:
+        """删除邀请码。"""
+        await redis.delete(f"invite:code:{code}")
+
+    async def create_join_request(
+        self,
+        redis: Redis,
+        request_id: str,
+        data: dict[str, str],
+        ttl_seconds: int = JOIN_REQUEST_TTL_SECONDS,
+    ) -> None:
+        """写入入团审批 Hash 并设置 TTL。"""
+        key = f"join_request:{request_id}"
+        await redis.hset(key, mapping=data)
+        await redis.expire(key, ttl_seconds)
+
+    async def get_join_request(
+        self, redis: Redis, request_id: str
+    ) -> dict[str, str] | None:
+        """获取入团审批记录，不存在时返回 None。"""
+        data = await redis.hgetall(f"join_request:{request_id}")
+        return data if data else None
+
+    async def add_team_pending_request(
+        self, redis: Redis, team_id: int, request_id: str
+    ) -> None:
+        """将审批 ID 加入团队待审批集合。"""
+        await redis.sadd(f"team:join_pending:{team_id}", request_id)
+
+    async def list_team_pending_request_ids(
+        self, redis: Redis, team_id: int
+    ) -> list[str]:
+        """列出团队所有待审批 ID。"""
+        members = await redis.smembers(f"team:join_pending:{team_id}")
+        return list(members)
+
+    async def remove_team_pending_request(
+        self, redis: Redis, team_id: int, request_id: str
+    ) -> None:
+        """从团队待审批集合移除审批 ID。"""
+        await redis.srem(f"team:join_pending:{team_id}", request_id)
+
+    async def delete_join_request(self, redis: Redis, request_id: str) -> None:
+        """删除入团审批记录。"""
+        await redis.delete(f"join_request:{request_id}")
 
 
 cache_repo = CacheRepository()

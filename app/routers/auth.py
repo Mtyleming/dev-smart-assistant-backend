@@ -2,7 +2,7 @@ from fastapi import APIRouter
 
 from app.core.config import settings
 from app.dependencies import AccessToken, CurrentUser, DbSession, RedisClient
-from app.schemas.auth import AuthData, LoginRequest, MeData, RefreshRequest, RegisterRequest
+from app.schemas.auth import AuthData, LoginRequest, MeData, RefreshRequest, RegisterRequest, SwitchTeamRequest
 from app.schemas.common import ApiResponse
 from app.services.auth_service import auth_service
 
@@ -79,3 +79,22 @@ async def logout(
     """登出当前用户，作废 Access Token 并清除登录会话。"""
     await auth_service.logout(redis, user["id"], access_token)
     return ApiResponse(message="登出成功")
+
+
+@router.post(
+    "/switch-team",
+    response_model=ApiResponse[AuthData],
+    summary="切换团队",
+)
+async def switch_team(
+    body: SwitchTeamRequest,
+    user: CurrentUser,
+    access_token: AccessToken,
+    db: DbSession,
+    redis: RedisClient,
+) -> ApiResponse[AuthData]:
+    """切换到用户已加入的其他团队，重签双 Token。"""
+    data = await auth_service.switch_team(
+        db, redis, user["id"], access_token, body
+    )
+    return ApiResponse(data=data)

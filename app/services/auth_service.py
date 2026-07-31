@@ -17,6 +17,7 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.core.super_admin import is_super_admin
 from app.models.base_models import TeamMemberRole, User
 from app.repositories.cache_repo import cache_repo
 from app.repositories.team_member_repo import team_member_repo
@@ -28,6 +29,7 @@ from app.schemas.auth import (
     MeData,
     RefreshRequest,
     RegisterRequest,
+    SwitchTeamRequest,
     UserBasicInfo,
 )
 
@@ -128,14 +130,51 @@ class AuthService:
         if not user or not user.is_active:
             raise UnauthorizedError("用户不存在或已禁用")
 
-        membership = await team_member_repo.get_default_membership(db, user.id)
-        if not membership:
+        team_id = await self._resolve_refresh_team_id(db, redis, user.id)
+        if team_id is None:
             raise AppException(code=40302, message="用户未加入任何团队", status_code=403)
 
         remaining_ttl = get_token_remaining_seconds(token_payload)
-        auth_data = await self._issue_auth_data(db, redis, user, membership.team_id)
+        auth_data = await self._issue_auth_data(db, redis, user, team_id)
         await cache_repo.add_token_to_blacklist(redis, jti, remaining_ttl)
         return auth_data
+
+    async def switch_team(
+        self,
+        db: AsyncSession,
+        redis: Redis | None,
+        user_id: str,
+        access_token: str,
+        payload: SwitchTeamRequest,
+    ) -> AuthData:
+        """切换当前团队，重签双 Token 并更新 Redis 会话。"""
+        if redis is None:
+            raise UnauthorizedError("切换团队失败，请稍后重试")
+
+        user = await user_repo.get_by_id(db, int(user_id))
+        if not user or not user.is_active:
+            raise UnauthorizedError("用户不存在或已禁用")
+
+        token_payload = parse_access_token(access_token)
+        old_jti = token_payload["jti"]
+        remaining_ttl = get_token_remaining_seconds(token_payload)
+
+        auth_data = await self._issue_auth_data(db, redis, user, payload.team_id)
+        await cache_repo.add_token_to_blacklist(redis, old_jti, remaining_ttl)
+        return auth_data
+
+    async def _resolve_refresh_team_id(
+        self, db: AsyncSession, redis: Redis, user_id: int
+    ) -> int | None:
+        """续期时优先使用 Redis 会话中的 team_id，否则取默认团队。"""
+        session = await cache_repo.get_login_session(redis, str(user_id))
+        if session and session.get("team_id"):
+            return int(session["team_id"])
+
+        membership = await team_member_repo.get_default_membership(db, user_id)
+        if membership:
+            return membership.team_id
+        return None
 
     async def logout(
         self,
@@ -171,6 +210,7 @@ class AuthService:
             email=user.email,
             role=membership.role.value,
             team_id=int(team_id),
+            is_super_admin=is_super_admin(user.id),
         )
 
     async def _issue_auth_data(

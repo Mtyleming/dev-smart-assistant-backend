@@ -117,6 +117,7 @@ app/
 | 认证 | `/api/v1/auth` | 注册、登录等 |
 | 用户 | `/api/v1/users` | 用户资料等 |
 | 团队 | `/api/v1/teams` | 团队管理 |
+| 超级管理员 | `/api/v1/admin` | 组织树、用户启停 |
 | 知识库 | `/api/v1/knowledge-bases` | 知识库列表等 |
 | 对话 | `/api/v1/conversations` | 消息列表等 |
 | 智能问答 | `/api/v1/chat` | `POST /ask` 发起问答 |
@@ -132,6 +133,17 @@ Authorization: Bearer <access_token>
 ```
 
 鉴权中间件会校验 Token 签名、有效期、黑名单及 Redis 登录态，并将 `user_id`、`team_id` 注入 `request.state`；**角色不入 Token**，需通过 `team_members` 表按 `user_id + team_id` 实时查询。同时滑动刷新 `session:login:{user_id}` 的 TTL（默认 30 分钟）。
+
+路由层通过 `dependencies.py` 中的依赖做角色校验：
+
+| 依赖 | 含义 |
+|------|------|
+| `CurrentUser` | 已登录，且为 Token 当前团队成员 |
+| `TeamMemberUser` | 已登录，且为路径 `team_id` 的团队成员 |
+| `TeamAdminUser` | 已登录，且为路径 `team_id` 的 **admin** |
+| `SuperAdminUser` | 已登录，且 `user_id` 为配置的超级管理员（默认 `15`） |
+
+角色不在允许范围内时返回 `403`，message 为「暂无对应角色权限」或「仅超级管理员可操作」。
 
 以下路径无需 Token：`/health`、`/docs`、`/api/v1/auth/register|login|refresh`、各模块 `/status`。
 
@@ -212,7 +224,8 @@ Authorization: Bearer <access_token>
   "username": "alice",
   "email": "alice@example.com",
   "role": "admin",
-  "team_id": 1
+  "team_id": 1,
+  "is_super_admin": false
 }
 ```
 
@@ -249,6 +262,221 @@ Authorization: Bearer <access_token>
 - 将当前 Access Token 的 `jti` 写入黑名单，TTL 为剩余有效期
 - 删除 Redis `session:login:{user_id}`
 
+### 切换团队 `POST /api/v1/auth/switch-team`
+
+请求头需携带 `Authorization: Bearer <access_token>`。
+
+请求体：
+
+```json
+{
+  "team_id": 2
+}
+```
+
+成功响应 `200`，`data` 结构与登录接口相同（新的双 Token + 用户基本信息，含新 `team_id` 与 `role`）。
+
+- 用户未加入目标团队时返回 `403`
+- 切换成功后旧 Access Token 的 `jti` 会写入黑名单
+- Token 续期（`refresh`）会优先使用 Redis 会话中的 `team_id`，与当前团队保持一致
+
+### 我的团队列表 `GET /api/v1/teams/mine`
+
+请求头需携带 `Authorization: Bearer <access_token>`，用于切换团队前展示可选团队。
+
+成功响应 `data` 示例：
+
+```json
+[
+  {
+    "id": 1,
+    "name": "研发团队",
+    "role": "admin",
+    "is_current": true
+  },
+  {
+    "id": 2,
+    "name": "产品团队",
+    "role": "developer",
+    "is_current": false
+  }
+]
+```
+
+- `is_current` 表示是否为 Token 中的当前团队
+- 不含已解散的团队
+
+### 生成邀请码 `POST /api/v1/teams/{team_id}/invites`
+
+请求头需携带 `Authorization: Bearer <access_token>`，仅团队 **admin** 可操作。
+
+成功响应 `201`，`data` 示例：
+
+```json
+{
+  "invite_code": "xYz9AbC...",
+  "expires_at": "2026-08-07T03:23:00Z",
+  "team_id": 1
+}
+```
+
+- 邀请码有效期 **7 天**，存储于 Redis `invite:code:{code}`
+- **一次性**：有人使用邀请码成功申请入团后，该码立即失效
+
+### 申请加入团队 `POST /api/v1/teams/join`
+
+请求头需携带 `Authorization: Bearer <access_token>`。
+
+请求体：
+
+```json
+{
+  "invite_code": "xYz9AbC..."
+}
+```
+
+成功响应 `201`，`data` 示例：
+
+```json
+{
+  "request_id": "uuid",
+  "team_id": 1,
+  "team_name": "研发团队",
+  "status": "pending"
+}
+```
+
+- 邀请码无效或已过期时返回 `404`
+- 已是团队成员或已有待审批申请时返回 `409`
+- 审批记录仅存 Redis，不落库：`join_request:{request_id}` + `team:join_pending:{team_id}`
+
+### 查看入团审批 `GET /api/v1/teams/{team_id}/join-requests`
+
+仅团队 **admin** 可操作。成功响应 `data` 为审批列表：
+
+```json
+[
+  {
+    "request_id": "uuid",
+    "user_id": 2,
+    "username": "bob",
+    "created_at": "2026-07-31T03:23:00Z",
+    "status": "pending"
+  }
+]
+```
+
+### 审批通过 `POST /api/v1/teams/{team_id}/join-requests/{request_id}/approve`
+
+仅团队 **admin** 可操作。请求体：
+
+```json
+{
+  "role": "developer"
+}
+```
+
+- `role` 可选：`admin`、`tech_lead`、`developer`
+- 审批通过后写入 `team_members` 表，并清理 Redis 审批记录
+
+### 拒绝入团申请 `POST /api/v1/teams/{team_id}/join-requests/{request_id}/reject`
+
+仅团队 **admin** 可操作，仅清理 Redis 审批记录，不写库。
+
+### 分配成员角色 `PUT /api/v1/teams/{team_id}/members/{user_id}/role`
+
+仅团队 **admin** 可操作。请求体：
+
+```json
+{
+  "role": "developer"
+}
+```
+
+- `role` 可选：`admin`、`tech_lead`、`developer`
+- 团队**必须有且只有一个 admin**
+- admin 可将 admin 权限**转让**给其他成员：将目标成员设为 `admin` 后，原 admin 自动降为 `developer`
+- 不可直接将 admin 降为其他角色，需先转让
+- 成功响应 `200`，`message` 为「角色已更新」
+
+### 移除团队成员 `DELETE /api/v1/teams/{team_id}/members/{user_id}`
+
+仅团队 **admin** 可操作。
+
+- 不可直接移除当前管理员，需先转让 admin 权限
+- 成功响应 `200`，`message` 为「成员已移除」
+
+### 解散团队 `DELETE /api/v1/teams/{team_id}`
+
+仅团队 **admin** 可操作。
+
+- 若团队仍有关联知识库，返回 `409 Conflict`，提示「请先清理团队关联的知识库数据」
+- 成功响应 `200`，`message` 为「团队已解散」
+
+### 超级管理员
+
+超级管理员由配置项 `SUPER_ADMIN_USER_ID` 指定（默认 `15`），**不修改 users 表结构**。可在 `.env` 中覆盖：
+
+```env
+SUPER_ADMIN_USER_ID=15
+```
+
+#### 获取组织树 `GET /api/v1/admin/organization`
+
+仅 **超级管理员** 可操作。返回按团队分组的树形结构，每个团队下的成员按 **admin → tech_lead → developer** 排序。
+
+成功响应 `data` 示例：
+
+```json
+{
+  "teams": [
+    {
+      "id": 1,
+      "name": "研发团队",
+      "description": null,
+      "member_count": 3,
+      "members": [
+        {
+          "id": 1,
+          "username": "alice",
+          "email": "alice@example.com",
+          "role": "admin",
+          "is_active": true,
+          "is_super_admin": true
+        },
+        {
+          "id": 2,
+          "username": "bob",
+          "email": "bob@example.com",
+          "role": "tech_lead",
+          "is_active": true,
+          "is_super_admin": false
+        }
+      ]
+    }
+  ],
+  "unassigned_users": []
+}
+```
+
+- `unassigned_users`：未加入任何团队的用户（`role` 为空字符串）
+- 同一用户加入多个团队时，会在各团队的 `members` 中分别出现
+
+#### 启用/停用用户 `PUT /api/v1/admin/users/{user_id}/status`
+
+仅 **超级管理员** 可操作。请求体：
+
+```json
+{
+  "is_active": false
+}
+```
+
+- `true` 启用用户，`false` 停用用户
+- 停用后该用户 Redis 登录会话立即清除，无法再使用已有 Token
+- 超级管理员不能停用自己的账号
+- 成功响应 `200`，`message` 为「用户已启用」或「用户已停用」
+
 ---
 
 ## 五、常用命令
@@ -271,6 +499,9 @@ Authorization: Bearer <access_token>
 - [x] AI 调用边界（仅 `services/ai/`）  
 - [x] README、`.env.example`、`.gitignore`  
 - [x] 关联 GitHub 公开仓库  
+- [x] 切换团队 `POST /api/v1/auth/switch-team`（重签 Token）  
+- [x] 邀请入团流程（邀请码生成、申请、Redis 审批通过/拒绝）  
+- [x] 超级管理员组织树与用户启停（`/api/v1/admin`）  
 
 ### 建议下一步
 

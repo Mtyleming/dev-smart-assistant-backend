@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     bailian_api_key: str = ""
     # 应用版本号
     app_version: str = "0.1.0"
+    # 超级管理员用户 ID（写死，不修改 users 表结构）
+    super_admin_user_id: int = 15
 
 
 @lru_cache

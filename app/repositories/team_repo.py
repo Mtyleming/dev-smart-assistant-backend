@@ -2,8 +2,9 @@
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
-from app.models.base_models import Team
+from app.models.base_models import Team, TeamMember
 
 
 class TeamRepository:
@@ -53,6 +54,16 @@ class TeamRepository:
         """软删除团队（解散）。"""
         team.is_delete = True
         await db.flush()
+
+    async def list_active_with_members(self, db: AsyncSession) -> list[Team]:
+        """查询所有未解散团队及其成员（含用户信息）。"""
+        result = await db.execute(
+            select(Team)
+            .options(joinedload(Team.members).joinedload(TeamMember.user))
+            .where(Team.is_delete.is_(False))
+            .order_by(Team.created_at.asc())
+        )
+        return list(result.scalars().unique().all())
 
 
 team_repo = TeamRepository()
