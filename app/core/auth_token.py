@@ -26,7 +26,7 @@ def parse_access_token(token: str) -> dict:
     """解码并校验 Access Token payload。
 
     Returns:
-        含 sub / jti / team_id / role 的 payload。
+        含 sub / jti / team_id 的 payload（角色需查 team_members）。
 
     Raises:
         UnauthorizedError: Token 无效或已过期。
@@ -44,8 +44,7 @@ def parse_access_token(token: str) -> dict:
     user_id = payload.get("sub")
     jti = payload.get("jti")
     team_id = payload.get("team_id")
-    role = payload.get("role")
-    if not user_id or not jti or not team_id or not role:
+    if not user_id or not jti or not team_id:
         raise UnauthorizedError("Access Token 无效")
 
     return payload

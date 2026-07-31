@@ -131,7 +131,7 @@ app/
 Authorization: Bearer <access_token>
 ```
 
-鉴权中间件会校验 Token 签名、有效期、黑名单及 Redis 登录态，并将 `user_id`、`team_id`、`role` 注入 `request.state`；同时滑动刷新 `session:login:{user_id}` 的 TTL（默认 30 分钟）。
+鉴权中间件会校验 Token 签名、有效期、黑名单及 Redis 登录态，并将 `user_id`、`team_id` 注入 `request.state`；**角色不入 Token**，需通过 `team_members` 表按 `user_id + team_id` 实时查询。同时滑动刷新 `session:login:{user_id}` 的 TTL（默认 30 分钟）。
 
 以下路径无需 Token：`/health`、`/docs`、`/api/v1/auth/register|login|refresh`、各模块 `/status`。
 

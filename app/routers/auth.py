@@ -16,7 +16,7 @@ router = APIRouter(prefix=settings.api_v1_prefix + "/auth", tags=["权限相关"
 )
 async def get_me(user: CurrentUser, db: DbSession) -> ApiResponse[MeData]:
     """从 Token 解析 user_id 并返回用户基本信息。"""
-    data = await auth_service.get_me(db, user["id"])
+    data = await auth_service.get_me(db, user["id"], user["team_id"])
     return ApiResponse(data=data)
 
 

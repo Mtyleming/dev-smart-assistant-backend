@@ -35,6 +35,13 @@ class ConflictError(AppException):
         super().__init__(code=40900, message=message, status_code=409)
 
 
+class ForbiddenError(AppException):
+    """无权限执行该操作。"""
+
+    def __init__(self, message: str = "无权限"):
+        super().__init__(code=40300, message=message, status_code=403)
+
+
 async def app_exception_handler(request: Request, exc: AppException):
     """全局业务异常处理器，返回统一 JSON 结构。"""
     _ = request

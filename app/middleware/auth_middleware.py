@@ -62,7 +62,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         user_id = payload["sub"]
         jti = payload["jti"]
         team_id = payload["team_id"]
-        role = payload["role"]
 
         try:
             await redis_client.ping()
@@ -80,7 +79,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.access_token = token
         request.state.user_id = user_id
         request.state.team_id = team_id
-        request.state.role = role
 
         await cache_repo.refresh_login_session_ttl(
             redis_client, user_id, settings.login_session_ttl

@@ -21,9 +21,9 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
     return pwd_context.verify(plain_password, password_hash)
 
 
-def create_access_token(user_id: str, team_id: str, role: str) -> tuple[str, str]:
+def create_access_token(user_id: str, team_id: str) -> tuple[str, str]:
     """签发 Access Token，返回 (token, jti)。"""
-    return _create_access_token(user_id, team_id, role, settings.access_token_expire)
+    return _create_access_token(user_id, team_id, settings.access_token_expire)
 
 
 def create_refresh_token(user_id: str) -> tuple[str, str]:
@@ -51,16 +51,15 @@ def get_token_remaining_seconds(payload: dict) -> int:
 
 
 def _create_access_token(
-    user_id: str, team_id: str, role: str, expire_seconds: int
+    user_id: str, team_id: str, expire_seconds: int
 ) -> tuple[str, str]:
-    """生成 Access JWT，payload 含 sub / jti / team_id / role。"""
+    """生成 Access JWT，payload 含 sub / jti / team_id（角色不入 Token）。"""
     jti = str(uuid4())
     now = datetime.now(UTC)
     payload = {
         "sub": user_id,
         "jti": jti,
         "team_id": team_id,
-        "role": role,
         "iat": now,
         "type": "access",
         "exp": now + timedelta(seconds=expire_seconds),

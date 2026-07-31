@@ -3,7 +3,7 @@
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.base_models import User, UserRole
+from app.models.base_models import User
 
 
 class UserRepository:
@@ -37,16 +37,12 @@ class UserRepository:
         username: str,
         email: str,
         password_hash: str,
-        team_id: int,
-        role: UserRole,
     ) -> User:
         """创建用户记录，id 由数据库自增生成。"""
         user = User(
             username=username,
             email=email,
             password_hash=password_hash,
-            team_id=team_id,
-            role=role,
         )
         db.add(user)
         await db.flush()
