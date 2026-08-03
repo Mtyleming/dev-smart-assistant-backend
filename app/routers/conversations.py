@@ -84,22 +84,6 @@ async def list_conversations(
 
 
 @router.get(
-    "/{conversation_id}/messages",
-    response_model=ApiResponse[list],
-    summary="对话消息列表",
-)
-async def list_messages(
-    conversation_id: int,
-    db: DbSession,
-    user: CurrentUser,
-) -> ApiResponse[list]:
-    messages = await message_repo.list_messages(
-        db, conversation_id, int(user["team_id"])
-    )
-    return ApiResponse(data=messages)
-
-
-@router.get(
     "/{conversation_id}",
     response_model=ApiResponse[ConversationDetailData],
     summary="获取对话详情",

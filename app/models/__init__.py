@@ -4,6 +4,9 @@ from app.models.base_models import (
     Conversation,
     ConversationMode,
     KnowledgeBase,
+    Message,
+    MessageContentType,
+    MessageRole,
     Team,
     TeamMember,
     TeamMemberRole,
@@ -18,4 +21,7 @@ __all__ = [
     "KnowledgeBase",
     "Conversation",
     "ConversationMode",
+    "Message",
+    "MessageContentType",
+    "MessageRole",
 ]

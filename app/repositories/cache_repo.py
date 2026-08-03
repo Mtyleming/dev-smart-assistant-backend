@@ -1,11 +1,23 @@
 """Redis 缓存封装。"""
 
+import json
+from datetime import datetime
+from typing import Any
+
 from redis.asyncio import Redis
 
 # 邀请码有效期 7 天
 INVITE_CODE_TTL_SECONDS = 604800
 # 入团审批记录保留 30 天
 JOIN_REQUEST_TTL_SECONDS = 30 * 24 * 3600
+# 对话消息列表缓存 15 分钟
+CONVERSATION_MESSAGES_TTL_SECONDS = 15 * 60
+# 对话消息处理分布式锁 30 秒
+CONVERSATION_LOCK_TTL_SECONDS = 30
+# 上下文超过该条数时触发摘要
+CONVERSATION_CONTEXT_SUMMARY_THRESHOLD = 20
+# 摘要后保留的最近消息条数
+CONVERSATION_CONTEXT_RECENT_KEEP = 10
 
 
 class CacheRepository:
@@ -111,6 +123,97 @@ class CacheRepository:
     async def delete_join_request(self, redis: Redis, request_id: str) -> None:
         """删除入团审批记录。"""
         await redis.delete(f"join_request:{request_id}")
+
+    def _conversation_messages_key(self, conversation_id: int) -> str:
+        """对话消息列表缓存 Key。"""
+        return f"conv:msg:{conversation_id}"
+
+    def _serialize_message_items(self, messages: list[dict[str, Any]]) -> str:
+        """将消息列表序列化为 JSON 字符串。"""
+        serialized: list[dict[str, Any]] = []
+        for message in messages:
+            item = dict(message)
+            created_at = item.get("created_at")
+            if isinstance(created_at, datetime):
+                item["created_at"] = created_at.isoformat()
+            serialized.append(item)
+        return json.dumps(serialized, ensure_ascii=False)
+
+    async def get_conversation_messages(
+        self, redis: Redis, conversation_id: int
+    ) -> list[dict[str, Any]] | None:
+        """获取对话消息列表缓存，不存在时返回 None。"""
+        data = await redis.get(self._conversation_messages_key(conversation_id))
+        if data is None:
+            return None
+        return json.loads(data)
+
+    async def set_conversation_messages(
+        self,
+        redis: Redis,
+        conversation_id: int,
+        messages: list[dict[str, Any]],
+        ttl_seconds: int = CONVERSATION_MESSAGES_TTL_SECONDS,
+    ) -> None:
+        """写入对话消息列表缓存并设置 TTL。"""
+        key = self._conversation_messages_key(conversation_id)
+        await redis.setex(key, ttl_seconds, self._serialize_message_items(messages))
+
+    async def refresh_conversation_messages_ttl(
+        self,
+        redis: Redis,
+        conversation_id: int,
+        ttl_seconds: int = CONVERSATION_MESSAGES_TTL_SECONDS,
+    ) -> None:
+        """刷新对话消息列表缓存 TTL（滑动续期）。"""
+        await redis.expire(self._conversation_messages_key(conversation_id), ttl_seconds)
+
+    async def delete_conversation_messages(
+        self, redis: Redis, conversation_id: int
+    ) -> None:
+        """删除对话消息列表缓存。"""
+        await redis.delete(self._conversation_messages_key(conversation_id))
+
+    def _conversation_lock_key(self, conversation_id: int) -> str:
+        """对话消息处理分布式锁 Key。"""
+        return f"conv:lock:{conversation_id}"
+
+    async def acquire_conversation_lock(
+        self,
+        redis: Redis,
+        conversation_id: int,
+        ttl_seconds: int = CONVERSATION_LOCK_TTL_SECONDS,
+    ) -> bool:
+        """尝试获取对话分布式锁（SETNX）。"""
+        return bool(
+            await redis.set(
+                self._conversation_lock_key(conversation_id),
+                "1",
+                nx=True,
+                ex=ttl_seconds,
+            )
+        )
+
+    async def release_conversation_lock(
+        self, redis: Redis, conversation_id: int
+    ) -> None:
+        """释放对话分布式锁。"""
+        await redis.delete(self._conversation_lock_key(conversation_id))
+
+    async def append_conversation_message(
+        self,
+        redis: Redis,
+        conversation_id: int,
+        message: dict[str, Any],
+        ttl_seconds: int = CONVERSATION_MESSAGES_TTL_SECONDS,
+    ) -> list[dict[str, Any]]:
+        """向对话消息列表缓存追加一条消息并刷新 TTL。"""
+        messages = await self.get_conversation_messages(redis, conversation_id) or []
+        messages.append(message)
+        await self.set_conversation_messages(
+            redis, conversation_id, messages, ttl_seconds
+        )
+        return messages
 
 
 cache_repo = CacheRepository()

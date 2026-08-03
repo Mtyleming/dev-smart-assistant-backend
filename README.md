@@ -80,6 +80,7 @@ app/
 │   ├── teams.py
 │   ├── knowledge_bases.py
 │   ├── conversations.py
+│   ├── messages.py
 │   ├── chat.py
 │   ├── code_assist.py
 │   ├── doc_generator.py
@@ -92,6 +93,7 @@ app/
 │   ├── doc_generator_service.py
 │   └── ai/                  # AI 只出现在这里
 │       ├── llm_client.py    # 百炼大模型封装
+│       ├── conversation_summary.py  # 对话历史摘要工具
 │       ├── rag_pipeline.py  # RAG 检索链路
 │       └── agent_graph.py   # LangGraph 状态机
 ├── repositories/            # 数据访问层：CRUD / 向量 / 缓存
@@ -120,6 +122,8 @@ app/
 | 超级管理员 | `/api/v1/admin` | 组织树、用户启停 |
 | 知识库 | `/api/v1/knowledge-bases` | 知识库列表等 |
 | 对话 | `/api/v1/conversations` | 消息列表等 |
+| 消息 | `/api/v1/messages` | 历史消息、删除消息 |
+| 发起对话 | `/api/v1/message` | `POST /chat` 发送消息并获取回复 |
 | 智能问答 | `/api/v1/chat` | `POST /ask` 发起问答 |
 | 代码辅助 | `/api/v1/code-assist` | `POST /assist` |
 | 文档生成 | `/api/v1/doc-generator` | `POST /generate` |
@@ -477,6 +481,146 @@ SUPER_ADMIN_USER_ID=15
 - 超级管理员不能停用自己的账号
 - 成功响应 `200`，`message` 为「用户已启用」或「用户已停用」
 
+### 历史消息 `POST /api/v1/messages/getMessageList`
+
+请求头需携带 `Authorization: Bearer <access_token>`。
+
+请求体：
+
+```json
+{
+  "conversationId": 1,
+  "page": 1,
+  "pageSize": 20
+}
+```
+
+- `conversationId`：对话 ID
+- `page`：页码，从 1 开始
+- `pageSize`：每页条数，1–100
+
+成功响应 `data` 示例：
+
+```json
+{
+  "items": [
+    {
+      "id": 1,
+      "role": "user",
+      "content": "你好",
+      "created_at": "2026-08-03T10:00:00"
+    }
+  ],
+  "total": 1,
+  "page": 1
+}
+```
+
+- 消息按创建时间正序排列
+- 对话不存在时返回 `404`，message 为「对话不存在」
+- 消息列表会缓存到 Redis，Key 为 `conv:msg:{conversation_id}`，TTL 15 分钟；命中缓存时滑动续期，未命中时查库并回填
+
+### 删除消息 `POST /api/v1/messages/remove`
+
+请求头需携带 `Authorization: Bearer <access_token>`。
+
+请求体：
+
+```json
+{
+  "messageId": 1,
+  "conversationId": 1
+}
+```
+
+- 成功响应 `200`，`message` 为「消息已删除」
+- 消息不存在或不属于当前用户对话时返回 `404`，message 为「消息不存在」
+
+### 发起对话 `POST /api/v1/message/chat`
+
+请求头需携带 `Authorization: Bearer <access_token>`。
+
+请求体：
+
+```json
+{
+  "content": "帮我写一个 FastAPI 登录接口",
+  "content_type": "text",
+  "conversation_id": 1
+}
+```
+
+- `content`：用户消息内容（必填）
+- `content_type`：`text` 或 `code`
+- `conversation_id`：对话 ID；**首次发起可不传**，系统会自动创建会话，标题取用户消息前 20 字
+
+成功响应 `data` 示例：
+
+```json
+{
+  "user_msg": {
+    "id": 1,
+    "role": "user",
+    "content": "帮我写一个 FastAPI 登录接口",
+    "content_type": "text",
+    "created_at": "2026-08-03T10:00:00"
+  },
+  "assistant_msg": {
+    "id": 2,
+    "role": "assistant",
+    "content": "可以使用 JWT 做鉴权...",
+    "content_type": "text",
+    "created_at": "2026-08-03T10:00:01"
+  }
+}
+```
+
+处理流程：
+
+1. 获取分布式锁 `conv:lock:{conversation_id}`（SETNX，TTL 30s），失败返回 `409`，message 为「消息处理中」
+2. 保存用户消息到数据库（`role=user`）
+3. 将用户消息追加到 Redis `conv:msg:{conversation_id}`，刷新 TTL 15 分钟
+4. 获取上下文；超过 20 条时调用 LLM 摘要，写入 system 提示词，并保留最近 10 条完整消息
+5. 保存助手回复到数据库与 Redis
+6. 更新会话 `updated_at`，用于列表排序
+7. 释放分布式锁
+
+---
+
+位于 `app/services/ai/conversation_summary.py`，供后续 chat / Agent 使用：当历史记录过长，可将较早的消息压缩为摘要并放入系统提示词。
+
+**LangChain Tool（供 Agent 导入）：**
+
+```python
+from app.services.ai.conversation_summary import (
+    DEFAULT_AGENT_TOOLS,
+    summarize_conversation_history_tool,
+)
+
+# 创建 Agent 时传入
+agent = create_agent(llm, tools=DEFAULT_AGENT_TOOLS)
+# 或单独使用
+tools = [summarize_conversation_history_tool]
+```
+
+**业务层直接调用：**
+
+```python
+from app.services.ai.conversation_summary import summarize_messages
+
+messages = [
+    {"role": "user", "content": "帮我写一个 FastAPI 登录接口"},
+    {"role": "assistant", "content": "可以使用 JWT 做鉴权..."},
+]
+summary = await summarize_messages(messages)
+```
+
+- Tool 入参 `messages_json`：JSON 字符串格式的历史消息列表
+- 输出：不超过 200 字的中文摘要字符串
+- API Key 从 `.env` 的 `DASHSCOPE_API_KEY` 读取
+- 未配置 Key 或 LLM 调用失败时，自动降级为截断版摘要
+- **当前不做 Redis 缓存**
+
 ---
 
 ## 五、常用命令
@@ -502,6 +646,9 @@ SUPER_ADMIN_USER_ID=15
 - [x] 切换团队 `POST /api/v1/auth/switch-team`（重签 Token）  
 - [x] 邀请入团流程（邀请码生成、申请、Redis 审批通过/拒绝）  
 - [x] 超级管理员组织树与用户启停（`/api/v1/admin`）  
+- [x] 消息历史分页与删除（`/api/v1/messages`）  
+- [x] 发起对话（`POST /api/v1/message/chat`）  
+- [x] 对话历史摘要 LangChain Tool（`summarize_conversation_history_tool`）  
 
 ### 建议下一步
 

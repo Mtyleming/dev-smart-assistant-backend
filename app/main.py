@@ -17,6 +17,7 @@ from app.routers import (
     auth,
     conversations,
     health,
+    messages,
     teams,
 )
 
@@ -68,5 +69,6 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(teams.router)
 app.include_router(conversations.router)
+app.include_router(messages.router)
 app.include_router(admin.router)
 

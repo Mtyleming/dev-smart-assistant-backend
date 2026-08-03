@@ -35,6 +35,21 @@ class ConversationMode(str, enum.Enum):
     doc = "doc"
 
 
+class MessageRole(str, enum.Enum):
+    """消息角色：用户 / 助手 / 系统。"""
+
+    user = "user"
+    assistant = "assistant"
+    system = "system"
+
+
+class MessageContentType(str, enum.Enum):
+    """消息内容类型。"""
+
+    text = "text"
+    code = "code"
+
+
 class Team(Base):
     """团队：数据隔离的基本单位。"""
 
@@ -170,3 +185,40 @@ class Conversation(Base):
     is_delete: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0"
     )
+
+    messages = relationship("Message", back_populates="conversation")
+
+
+class Message(Base):
+    """对话消息：一次问答中的单条记录。"""
+
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("conversations.id"), nullable=False, index=True
+    )
+    role: Mapped[MessageRole] = mapped_column(
+        Enum(
+            MessageRole,
+            values_callable=lambda roles: [role.value for role in roles],
+        ),
+        nullable=False,
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[MessageContentType] = mapped_column(
+        Enum(
+            MessageContentType,
+            values_callable=lambda types: [item.value for item in types],
+        ),
+        nullable=False,
+        server_default=MessageContentType.text.value,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+    is_delete: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0"
+    )
+
+    conversation = relationship("Conversation", back_populates="messages")

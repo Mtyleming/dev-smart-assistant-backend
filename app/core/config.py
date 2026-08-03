@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,8 +32,29 @@ class Settings(BaseSettings):
     refresh_token_expire: int = 604800
     # 登录会话 Redis TTL（秒），滑动过期
     login_session_ttl: int = 1800
-    # 百炼平台 API Key
-    bailian_api_key: str = ""
+    # 百炼 / DashScope API Key（.env 中使用 DASHSCOPE_API_KEY）
+    llm_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("DASHSCOPE_API_KEY", "BAILIAN_API_KEY"),
+    )
+    # DashScope 兼容模式地址（国内站默认；国际站 Key 需改为 dashscope-intl 域名）
+    llm_api_base: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        validation_alias=AliasChoices("DASHSCOPE_API_BASE", "LLM_API_BASE"),
+    )
+    # 对话模型名称（如 qwen-plus、qwen-max、qwen-turbo）
+    llm_model: str = Field(
+        default="qwen-plus",
+        validation_alias=AliasChoices("LLM_MODEL", "DASHSCOPE_MODEL"),
+    )
+
+    @field_validator("llm_api_key", mode="before")
+    @classmethod
+    def strip_llm_api_key(cls, value: object) -> object:
+        """去除 API Key 首尾空白，避免 .env 误输入导致 401。"""
+        if isinstance(value, str):
+            return value.strip()
+        return value
     # 应用版本号
     app_version: str = "0.1.0"
     # 超级管理员用户 ID（写死，不修改 users 表结构）

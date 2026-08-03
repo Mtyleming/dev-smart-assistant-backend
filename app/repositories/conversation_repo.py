@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.base_models import Conversation, ConversationMode
@@ -167,6 +167,19 @@ class ConversationRepository:
     ) -> None:
         """逻辑删除对话。"""
         conversation.is_delete = True
+        await db.flush()
+
+    async def touch_updated_at(
+        self,
+        db: AsyncSession,
+        conversation_id: int,
+    ) -> None:
+        """刷新对话更新时间，用于列表排序。"""
+        await db.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id)
+            .values(updated_at=func.now())
+        )
         await db.flush()
 
 
