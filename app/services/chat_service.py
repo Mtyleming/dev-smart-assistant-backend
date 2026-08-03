@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.repositories.conversation_repo import conversation_repo
+from app.repositories.message_repo import message_repo
 from app.services.ai.rag_pipeline import rag_pipeline
 
 
@@ -16,16 +16,16 @@ class ChatService:
         db: AsyncSession,
         user: dict[str, Any],
         question: str,
-        conversation_id: str,
+        conversation_id: int,
     ) -> dict:
         """处理一次问答请求。"""
-        await conversation_repo.save_message(db, conversation_id, "user", question)
+        await message_repo.save_message(db, conversation_id, "user", question)
         result = await rag_pipeline.query(
             question=question,
             team_id=user["team_id"],
             kb_ids=user.get("accessible_kb_ids", []),
         )
-        await conversation_repo.save_message(
+        await message_repo.save_message(
             db, conversation_id, "assistant", result["answer"]
         )
         return result

@@ -27,6 +27,14 @@ class TeamMemberRole(str, enum.Enum):
     developer = "developer"
 
 
+class ConversationMode(str, enum.Enum):
+    """对话模式：智能问答 / 代码辅助 / 文档生成。"""
+
+    qa = "qa"
+    code = "code"
+    doc = "doc"
+
+
 class Team(Base):
     """团队：数据隔离的基本单位。"""
 
@@ -128,3 +136,37 @@ class KnowledgeBase(Base):
     )
 
     team = relationship("Team", back_populates="knowledge_bases")
+
+
+class Conversation(Base):
+    """对话会话：用户在当前团队下的一次多轮交互。"""
+
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    mode: Mapped[ConversationMode] = mapped_column(
+        Enum(
+            ConversationMode,
+            values_callable=lambda modes: [mode.value for mode in modes],
+        ),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id"), nullable=False, index=True
+    )
+    team_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("teams.id"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        server_onupdate=func.now(),
+    )
+    is_delete: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0"
+    )

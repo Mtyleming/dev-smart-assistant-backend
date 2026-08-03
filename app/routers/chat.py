@@ -14,7 +14,7 @@ class AskRequest(BaseModel):
     """问答请求体。"""
 
     question: str = Field(..., min_length=1, description="用户问题")
-    conversation_id: str = Field(..., min_length=1, description="对话 ID")
+    conversation_id: int = Field(..., description="对话 ID")
 
 
 @router.post("/ask", response_model=ApiResponse[dict], summary="发起问答")

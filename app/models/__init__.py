@@ -1,5 +1,21 @@
 """SQLAlchemy 声明式模型。"""
 
-from app.models.base_models import KnowledgeBase, Team, TeamMember, TeamMemberRole, User
+from app.models.base_models import (
+    Conversation,
+    ConversationMode,
+    KnowledgeBase,
+    Team,
+    TeamMember,
+    TeamMemberRole,
+    User,
+)
 
-__all__ = ["User", "Team", "TeamMember", "TeamMemberRole", "KnowledgeBase"]
+__all__ = [
+    "User",
+    "Team",
+    "TeamMember",
+    "TeamMemberRole",
+    "KnowledgeBase",
+    "Conversation",
+    "ConversationMode",
+]
