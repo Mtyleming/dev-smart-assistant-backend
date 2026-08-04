@@ -143,6 +143,7 @@ Authorization: Bearer <access_token>
 | 依赖 | 含义 |
 |------|------|
 | `CurrentUser` | 已登录，且为 Token 当前团队成员 |
+| `CurrentTeamAdminOrLead` | 已登录，且当前团队角色为 **admin** 或 **tech_lead** |
 | `TeamMemberUser` | 已登录，且为路径 `team_id` 的团队成员 |
 | `TeamAdminUser` | 已登录，且为路径 `team_id` 的 **admin** |
 | `SuperAdminUser` | 已登录，且 `user_id` 为配置的超级管理员（默认 `15`） |
@@ -536,6 +537,100 @@ SUPER_ADMIN_USER_ID=15
 - 成功响应 `200`，`message` 为「消息已删除」
 - 消息不存在或不属于当前用户对话时返回 `404`，message 为「消息不存在」
 
+### 知识库
+
+知识库归属 **Token 当前团队**；创建/修改/删除仅 **admin**、**tech_lead** 可操作，列表与详情对全体成员开放。
+
+删除时先按 `knowledge_base_id + team_id` 清理 Milvus 向量，成功后再删 MySQL；向量清理失败则整次失败，库记录保留。
+
+相关环境变量（见 `.env.example`）：
+
+```env
+MILVUS_URI=http://127.0.0.1:19530
+MILVUS_COLLECTION=document_chunks
+```
+
+#### 创建知识库 `POST /api/v1/knowledge-bases/create`
+
+请求体：
+
+```json
+{
+  "name": "产品需求库",
+  "description": "存放 PRD 与需求说明"
+}
+```
+
+成功响应 `201`，`data` 示例：`{"id": 1}`，`message` 为「创建成功」。
+
+- 同团队名称重复时返回 `409`，message 为「知识库名称已存在」
+- 开发者调用返回 `403`
+
+#### 分页列表 `POST /api/v1/knowledge-bases/page`
+
+请求体：
+
+```json
+{
+  "page": 1,
+  "pageSize": 20,
+  "keyword": "需求"
+}
+```
+
+- `page`：页码，从 1 开始
+- `pageSize`：每页条数，1–100
+- `keyword`：可选，按名称模糊搜索
+
+成功响应 `data` 示例：
+
+```json
+{
+  "items": [
+    {
+      "id": 1,
+      "name": "产品需求库",
+      "description": "存放 PRD 与需求说明",
+      "team_id": 1,
+      "created_by": 2,
+      "created_at": "2026-08-04T10:00:00",
+      "updated_at": "2026-08-04T10:00:00"
+    }
+  ],
+  "total": 1,
+  "page": 1
+}
+```
+
+#### 详情 `POST /api/v1/knowledge-bases/getById`
+
+请求体：`{"id": 1}`
+
+- 不存在或不属于当前团队时返回 `404`，message 为「知识库不存在」
+
+#### 修改 `POST /api/v1/knowledge-bases/update`
+
+请求体：
+
+```json
+{
+  "id": 1,
+  "name": "新名称",
+  "description": "新描述"
+}
+```
+
+- `name`、`description` 均为可选，但至少提供一个；未传字段保持原值
+- `description` 传 `null` 可清空描述
+- 成功响应 `message` 为「更新成功」
+
+#### 删除 `POST /api/v1/knowledge-bases/delete`
+
+请求体：`{"id": 1}`
+
+- 成功响应 `message` 为「删除成功」
+- Milvus 清理失败时返回 `503`，message 为「向量数据清理失败，知识库未删除」
+
 ### 发起对话 `POST /api/v1/messages/chat`
 
 请求头需携带 `Authorization: Bearer <access_token>`。
@@ -660,18 +755,18 @@ summary = await summarize_messages(messages)
 - [x] 消息历史分页与删除（`/api/v1/messages`）  
 - [x] 发起对话（`POST /api/v1/message/chat`）  
 - [x] 对话历史摘要 LangChain Tool（`summarize_conversation_history_tool`）  
+- [x] 知识库 CRUD（`/api/v1/knowledge-bases`：创建/分页/详情/修改/删除，删除前清 Milvus）  
 
 ### 建议下一步
 
 1. 配好本机 MySQL，用 Alembic 做正式建表迁移  
-2. 把演示鉴权换成真实 JWT / Session  
-3. 接入百炼 `DASHSCOPE_API_KEY`，打通真正的问答链路  
-4. 接入 Milvus 与 Redis 的真实读写  
-5. 与前端 `dev-smart-assistant-frontend` 联调登录与流式对话  
+2. 接入百炼 `DASHSCOPE_API_KEY`，打通真正的问答链路  
+3. 知识库文档上传、切块与 Embedding 入库  
+4. 与前端 `dev-smart-assistant-frontend` 联调登录与流式对话  
 
 ### 已知注意点
 
-- 骨架阶段 Repository / AI 多为占位实现，不会真正连库或调模型  
+- 部分 AI / RAG 仍为占位实现；知识库删除已真实调用 Milvus（Collection 不存在时跳过清理）  
 - 启动健康检查与各模块 `/status` **不依赖** MySQL；带 `DbSession` 的接口在真正执行 SQL 前一般也不会立刻连库，但正式业务开发前请先配好 `.env` 中的 `DATABASE_URL`  
 - Python 本机若是 3.13，满足「3.12+」要求；团队若统一 3.12，可在虚拟环境中指定 3.12 解释器  
 

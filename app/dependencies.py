@@ -97,6 +97,12 @@ def team_access(*allowed_roles: str):
 # 默认：Token 当前团队成员，不限角色
 CurrentUser = Annotated[dict[str, Any], Depends(current_user())]
 
+# Token 当前团队：admin 或 tech_lead
+CurrentTeamAdminOrLead = Annotated[
+    dict[str, Any],
+    Depends(current_user("admin", "tech_lead")),
+]
+
 # 路径 team_id：任意团队成员
 TeamMemberUser = Annotated[dict[str, Any], Depends(team_access())]
 

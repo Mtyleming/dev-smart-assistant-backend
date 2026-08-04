@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     )
     # 对话模型名称（如 qwen-plus、qwen-max、qwen-turbo）
     llm_model: str = Field(
-        default="qwen-plus",
+        default="qwen3.7-plus",
         validation_alias=AliasChoices("LLM_MODEL", "DASHSCOPE_MODEL"),
     )
 
@@ -59,6 +59,16 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     # 超级管理员用户 ID（写死，不修改 users 表结构）
     super_admin_user_id: int = 15
+    # Milvus 连接地址（本地默认）
+    milvus_uri: str = Field(
+        default="http://127.0.0.1:19530",
+        validation_alias=AliasChoices("MILVUS_URI"),
+    )
+    # 文档切块向量 Collection 名
+    milvus_collection: str = Field(
+        default="document_chunks",
+        validation_alias=AliasChoices("MILVUS_COLLECTION"),
+    )
 
 
 @lru_cache
