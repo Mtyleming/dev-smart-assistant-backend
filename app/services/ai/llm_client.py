@@ -1,6 +1,7 @@
 """百炼平台大模型调用封装。"""
 
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -120,16 +121,13 @@ class LLMClient:
             logger.warning("摘要生成失败，使用降级摘要：%s", exc)
             return _fallback_summary(formatted)
 
-    async def chat(
+    def _build_lc_messages(
         self,
         messages: list[dict[str, Any]],
         *,
         system_prompt: str | None = None,
-    ) -> str:
-        """根据对话上下文生成助手回复。"""
-        if not messages:
-            return ""
-
+    ) -> list[SystemMessage | HumanMessage | AIMessage]:
+        """将业务消息列表转换为 LangChain 消息格式。"""
         lc_messages: list[SystemMessage | HumanMessage | AIMessage] = []
         if system_prompt:
             lc_messages.append(SystemMessage(content=system_prompt))
@@ -145,18 +143,35 @@ class LLMClient:
                 lc_messages.append(SystemMessage(content=content))
             else:
                 lc_messages.append(HumanMessage(content=content))
+        return lc_messages
+
+    def _placeholder_reply(self, messages: list[dict[str, Any]]) -> str:
+        """未配置 API Key 时的占位回复。"""
+        last_user = next(
+            (
+                str(message.get("content") or "")
+                for message in reversed(messages)
+                if message.get("role") == "user"
+            ),
+            "",
+        )
+        return f"（骨架占位）已收到你的消息：{last_user[:100]}"
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str | None = None,
+    ) -> str:
+        """根据对话上下文生成助手回复。"""
+        if not messages:
+            return ""
+
+        lc_messages = self._build_lc_messages(messages, system_prompt=system_prompt)
 
         if not self._settings.llm_api_key:
             logger.warning("未配置 DASHSCOPE_API_KEY，返回占位回复")
-            last_user = next(
-                (
-                    str(message.get("content") or "")
-                    for message in reversed(messages)
-                    if message.get("role") == "user"
-                ),
-                "",
-            )
-            return f"（骨架占位）已收到你的消息：{last_user[:100]}"
+            return self._placeholder_reply(messages)
 
         try:
             response = await _get_llm(
@@ -178,6 +193,40 @@ class LLMClient:
             ) from exc
         except Exception as exc:
             logger.warning("对话生成失败：%s", exc)
+            raise
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        system_prompt: str | None = None,
+    ) -> AsyncIterator[str]:
+        """流式生成助手回复，逐块 yield 文本内容。"""
+        if not messages:
+            return
+
+        lc_messages = self._build_lc_messages(messages, system_prompt=system_prompt)
+
+        if not self._settings.llm_api_key:
+            logger.warning("未配置 DASHSCOPE_API_KEY，返回占位回复")
+            yield self._placeholder_reply(messages)
+            return
+
+        try:
+            async for chunk in _get_llm(
+                self._settings.llm_api_key,
+                self._settings.llm_api_base,
+                self._settings.llm_model,
+            ).astream(lc_messages):
+                content = chunk.content
+                if not content:
+                    continue
+                if not isinstance(content, str):
+                    content = str(content)
+                yield content
+
+        except Exception as exc:
+            logger.warning("对话流式生成失败：%s", exc)
             raise
 
     async def embed(self, texts: list[str]) -> list[list[float]]:

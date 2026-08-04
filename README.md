@@ -536,9 +536,11 @@ SUPER_ADMIN_USER_ID=15
 - 成功响应 `200`，`message` 为「消息已删除」
 - 消息不存在或不属于当前用户对话时返回 `404`，message 为「消息不存在」
 
-### 发起对话 `POST /api/v1/message/chat`
+### 发起对话 `POST /api/v1/messages/chat`
 
 请求头需携带 `Authorization: Bearer <access_token>`。
+
+响应类型为 **SSE 流式**（`Content-Type: text/event-stream`），前端请使用 `EventSource` 或 `fetch` + `ReadableStream` 消费。
 
 请求体：
 
@@ -554,25 +556,34 @@ SUPER_ADMIN_USER_ID=15
 - `content_type`：`text` 或 `code`
 - `conversation_id`：对话 ID；**首次发起可不传**，系统会自动创建会话，标题取用户消息前 20 字
 
-成功响应 `data` 示例：
+SSE 事件说明：
 
-```json
-{
-  "user_msg": {
-    "id": 1,
-    "role": "user",
-    "content": "帮我写一个 FastAPI 登录接口",
-    "content_type": "text",
-    "created_at": "2026-08-03T10:00:00"
-  },
-  "assistant_msg": {
-    "id": 2,
-    "role": "assistant",
-    "content": "可以使用 JWT 做鉴权...",
-    "content_type": "text",
-    "created_at": "2026-08-03T10:00:01"
-  }
-}
+| event | data 说明 |
+|-------|-----------|
+| `conversation` | 新建会话时返回 `{"conversation_id": 1}` |
+| `user_msg` | 用户消息对象（含 id、role、content 等） |
+| `delta` | 助手回复增量 `{"content": "..."}` |
+| `assistant_msg` | 助手完整消息对象（落库后） |
+| `done` | 流结束，`data` 为 `null` |
+| `error` | 错误信息 `{"code": 40900, "message": "..."}` |
+
+示例流：
+
+```
+event: user_msg
+data: {"id": 1, "role": "user", "content": "...", "content_type": "text", "created_at": "..."}
+
+event: delta
+data: {"content": "可以"}
+
+event: delta
+data: {"content": "使用 JWT"}
+
+event: assistant_msg
+data: {"id": 2, "role": "assistant", "content": "可以使用 JWT...", ...}
+
+event: done
+data: null
 ```
 
 处理流程：

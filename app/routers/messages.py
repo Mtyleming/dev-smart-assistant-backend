@@ -1,13 +1,22 @@
 """消息管理路由：/api/v1/messages。"""
 
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 
 from app.core.config import settings
+from app.core.database import async_session_factory
+from app.core.event_stream import event_stream, format_sse_event
+from app.core.exceptions import AppException
 from app.dependencies import CurrentUser, DbSession, RedisClient
 from app.schemas.common import ApiResponse, ModuleStatus
-from app.schemas.message import MessageListData, MessageListRequest, MessageRemoveRequest, ChatRequest, ChatResponseData
-from app.services.message_service import message_service
+from app.schemas.message import (
+    ChatRequest,
+    MessageListData,
+    MessageListRequest,
+    MessageRemoveRequest,
+)
 from app.services.chat_service import chat_service
+from app.services.message_service import message_service
 
 router = APIRouter(
     prefix=settings.api_v1_prefix + "/messages",
@@ -58,15 +67,39 @@ async def remove_message(
 
 @router.post(
     "/chat",
-    response_model=ApiResponse[ChatResponseData],
-    summary="发起对话",
+    summary="发起对话（SSE 流式）",
+    response_class=StreamingResponse,
 )
 async def send_chat_message(
     body: ChatRequest,
-    db: DbSession,
     user: CurrentUser,
     redis: RedisClient,
-) -> ApiResponse[ChatResponseData]:
-    """发送用户消息并获取助手回复。"""
-    data = await chat_service.send_message(db, user, body, redis)
-    return ApiResponse(data=data)
+) -> StreamingResponse:
+    """发送用户消息并以 SSE 流式返回助手回复。"""
+
+    async def stream_events():
+        try:
+            async with async_session_factory() as db:
+                events = chat_service.send_message_stream(db, user, body, redis)
+                async for sse_chunk in event_stream(events):
+                    yield sse_chunk
+        except AppException as exc:
+            yield format_sse_event(
+                "error",
+                {"code": exc.code, "message": exc.message},
+            )
+        except Exception:
+            yield format_sse_event(
+                "error",
+                {"code": 50000, "message": "服务内部错误"},
+            )
+
+    return StreamingResponse(
+        stream_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

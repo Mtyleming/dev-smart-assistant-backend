@@ -1,5 +1,6 @@
 """发起对话业务逻辑。"""
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 from redis.asyncio import Redis
@@ -212,6 +213,112 @@ class ChatService:
             raise
         finally:
             # 步骤 8：无论成功或失败，都释放分布式锁
+            await cache_repo.release_conversation_lock(redis, conversation_id)
+
+    async def send_message_stream(
+        self,
+        db: AsyncSession,
+        user: dict[str, Any],
+        payload: ChatRequest,
+        redis: Redis | None,
+    ) -> AsyncIterator[tuple[str | None, Any]]:
+        """
+        流式发起对话，按 SSE 事件逐步产出：
+        - conversation: 会话 ID（新建会话时）
+        - user_msg: 用户消息
+        - delta: 助手回复增量文本
+        - assistant_msg: 助手完整消息
+        - done: 流结束
+        """
+        if redis is None:
+            raise AppException(
+                code=50301,
+                message="服务暂不可用，请稍后重试",
+                status_code=503,
+            )
+
+        user_id = int(user["id"])
+        team_id = int(user["team_id"])
+
+        conversation = await self._ensure_conversation(
+            db,
+            conversation_id=payload.conversation_id,
+            user_id=user_id,
+            team_id=team_id,
+            content=payload.content,
+            content_type=payload.content_type.value,
+        )
+        conversation_id = conversation.id
+
+        if payload.conversation_id is None:
+            yield "conversation", {"conversation_id": conversation_id}
+
+        lock_acquired = await cache_repo.acquire_conversation_lock(
+            redis, conversation_id
+        )
+        if not lock_acquired:
+            raise ConflictError("消息处理中")
+
+        try:
+            user_message = await message_repo.save_message(
+                db,
+                conversation_id,
+                "user",
+                payload.content,
+                payload.content_type.value,
+            )
+            user_msg_data = _message_to_dict(user_message)
+            yield "user_msg", user_msg_data
+
+            cached = await cache_repo.get_conversation_messages(redis, conversation_id)
+            if cached is None:
+                context = await message_repo.list_all(
+                    db,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    team_id=team_id,
+                )
+            else:
+                context = cached
+                if not context or context[-1].get("id") != user_message.id:
+                    context = [*context, user_msg_data]
+            await cache_repo.set_conversation_messages(redis, conversation_id, context)
+
+            system_prompt, llm_context = await self._build_system_prompt(context)
+
+            assistant_chunks: list[str] = []
+            async for chunk in llm_client.chat_stream(
+                llm_context,
+                system_prompt=system_prompt,
+            ):
+                assistant_chunks.append(chunk)
+                yield "delta", {"content": chunk}
+
+            assistant_content = "".join(assistant_chunks).strip()
+
+            assistant_message = await message_repo.save_message(
+                db,
+                conversation_id,
+                "assistant",
+                assistant_content,
+                payload.content_type.value,
+            )
+            assistant_msg_data = _message_to_dict(assistant_message)
+            context = [*context, assistant_msg_data]
+            await cache_repo.set_conversation_messages(redis, conversation_id, context)
+
+            await conversation_repo.touch_updated_at(db, conversation_id)
+            await db.commit()
+
+            await db.refresh(user_message)
+            await db.refresh(assistant_message)
+
+            yield "assistant_msg", assistant_msg_data
+            yield "done", None
+        except Exception:
+            await db.rollback()
+            raise
+        finally:
             await cache_repo.release_conversation_lock(redis, conversation_id)
 
 
