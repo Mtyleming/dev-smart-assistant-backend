@@ -101,13 +101,30 @@ class DocumentRepository:
         *,
         file_path: str | None = None,
         file_size: int | None = None,
+        full_text: str | None = None,
+        set_full_text: bool = False,
         status: DocumentStatus | None = None,
     ) -> Document:
-        """更新文件路径/大小/状态。"""
+        """更新文件路径/大小/全文/状态。
+
+        Args:
+            db: 数据库会话。
+            doc: 文档实体。
+            file_path: 新路径；None 表示不改。
+            file_size: 新大小；None 表示不改。
+            full_text: 解析全文；需配合 set_full_text=True。
+            set_full_text: 为 True 时写入 full_text（允许置空）。
+            status: 新状态；None 表示不改。
+
+        Returns:
+            刷新后的文档实体。
+        """
         if file_path is not None:
             doc.file_path = file_path
         if file_size is not None:
             doc.file_size = file_size
+        if set_full_text:
+            doc.full_text = full_text
         if status is not None:
             doc.status = status
         await db.flush()

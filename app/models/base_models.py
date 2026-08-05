@@ -14,6 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -179,6 +180,8 @@ class Document(Base):
     file_type: Mapped[str] = mapped_column(String(20), nullable=False)
     file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
     file_size: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    # 解析后的全文；切片与向量化前先完整落库
+    full_text: Mapped[str | None] = mapped_column(LONGTEXT, nullable=True)
     status: Mapped[DocumentStatus] = mapped_column(
         Enum(
             DocumentStatus,

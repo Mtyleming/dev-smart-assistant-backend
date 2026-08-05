@@ -31,6 +31,7 @@ from app.schemas.knowledge import (
     KnowledgePageRequest,
     KnowledgeUpdateRequest,
 )
+from app.services.document_parser import DocumentParseError, parse_document
 
 
 def _to_item(kb: KnowledgeBase) -> KnowledgeItem:
@@ -45,7 +46,7 @@ def _to_item(kb: KnowledgeBase) -> KnowledgeItem:
     )
 
 
-def _to_document_item(doc: Document) -> DocumentItem:
+def _to_document_item(doc: Document, *, include_full_text: bool = False) -> DocumentItem:
     return DocumentItem(
         id=doc.id,
         knowledge_base_id=doc.knowledge_base_id,
@@ -54,6 +55,7 @@ def _to_document_item(doc: Document) -> DocumentItem:
         file_path=doc.file_path,
         file_size=doc.file_size,
         status=doc.status.value if hasattr(doc.status, "value") else str(doc.status),
+        full_text=doc.full_text if include_full_text else None,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
     )
@@ -169,7 +171,7 @@ class KnowledgeService:
             raise NotFoundError("知识库不存在")
 
         # 先清向量；失败则抛错，不执行下方 delete / commit
-        await vector_repo.delete_by_knowledge_base(team_id, kb.id)
+        #await vector_repo.delete_by_knowledge_base(team_id, kb.id)
         await knowledge_repo.delete(db, kb)
         await db.commit()
 
@@ -192,7 +194,11 @@ class KnowledgeService:
         kb_id: int,
         file: UploadFile,
     ) -> DocumentCreateData:
-        """上传文档：先落库 uploading，存盘后改为 uploaded；解析留 TODO。"""
+        """上传文档：落盘后按策略解析全文并写入 documents.full_text。
+
+        流程：uploading → 存盘 → parsing → completed（失败则为 failed）。
+        切片与向量化后续再做。
+        """
         team_id = self._team_id(user)
         kb = await knowledge_repo.get_by_id_and_team(db, kb_id, team_id)
         if not kb:
@@ -210,9 +216,10 @@ class KnowledgeService:
         if not content:
             raise AppException(code=40002, message="文件内容为空", status_code=400)
         if len(content) > settings.upload_max_bytes:
+            max_mb = settings.upload_max_bytes // (1024 * 1024)
             raise AppException(
                 code=40003,
-                message=f"文件过大，最大允许 {settings.upload_max_bytes} 字节",
+                message=f"文件过大，最大允许 {max_mb}MB",
                 status_code=400,
             )
 
@@ -236,13 +243,9 @@ class KnowledgeService:
                 db,
                 doc,
                 file_size=file_size,
-                status=DocumentStatus.uploaded,
+                status=DocumentStatus.parsing,
             )
             await db.commit()
-
-            # TODO: 文档解析（切块 / Embedding / 入库），期间可将 status 置为 parsing
-            # await document_parse_service.parse(doc.id)
-
         except Exception:
             await document_repo.update_file_meta(
                 db, doc, status=DocumentStatus.failed
@@ -250,6 +253,37 @@ class KnowledgeService:
             await db.commit()
             raise AppException(
                 code=50001, message="文件保存失败", status_code=500
+            ) from None
+
+        try:
+            full_text = await parse_document(relative_path, file_type)
+            await document_repo.update_file_meta(
+                db,
+                doc,
+                full_text=full_text,
+                set_full_text=True,
+                status=DocumentStatus.completed,
+            )
+            await db.commit()
+
+            # 后续开发：切块 / Embedding / 写入 Milvus
+            # await document_chunk_service.chunk_and_embed(doc.id)
+
+        except DocumentParseError as exc:
+            await document_repo.update_file_meta(
+                db, doc, status=DocumentStatus.failed
+            )
+            await db.commit()
+            raise AppException(
+                code=40004, message=exc.message, status_code=400
+            ) from None
+        except Exception:
+            await document_repo.update_file_meta(
+                db, doc, status=DocumentStatus.failed
+            )
+            await db.commit()
+            raise AppException(
+                code=50002, message="文档解析失败", status_code=500
             ) from None
 
         return DocumentCreateData(id=doc.id)
@@ -265,7 +299,7 @@ class KnowledgeService:
         )
         if not doc:
             raise NotFoundError("文档不存在")
-        return _to_document_item(doc)
+        return _to_document_item(doc, include_full_text=True)
 
     async def page_documents(
         self,

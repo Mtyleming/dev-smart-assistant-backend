@@ -114,10 +114,13 @@ async def delete_knowledge_base(
     status_code=201,
 )
 async def create_documents(
+    kb_id: Annotated[int, Form(description="知识库 ID")],
+    file: Annotated[
+        UploadFile,
+        File(description="选择要上传的文档（支持 pdf / docx / md / txt，最大 20MB）"),
+    ],
     db: DbSession,
     user: CurrentTeamAdminOrLead,
-    kb_id: Annotated[int, Form(description="知识库 ID")],
-    file: Annotated[UploadFile, File(description="文档文件")],
 ) -> ApiResponse[DocumentCreateData]:
     data = await knowledge_service.create_document(db, user, kb_id=kb_id, file=file)
     return ApiResponse(message="上传成功", data=data)

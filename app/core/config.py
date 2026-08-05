@@ -74,9 +74,9 @@ class Settings(BaseSettings):
         default="uploads",
         validation_alias=AliasChoices("UPLOAD_DIR"),
     )
-    # 单文件最大上传体积（字节），默认 50MB
+    # 单文件最大上传体积（字节），默认 20MB
     upload_max_bytes: int = Field(
-        default=50 * 1024 * 1024,
+        default=20 * 1024 * 1024,
         validation_alias=AliasChoices("UPLOAD_MAX_BYTES"),
     )
 

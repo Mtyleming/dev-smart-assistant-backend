@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 
 from app.core.config import settings
 from app.core.database import Base, engine
@@ -47,11 +48,49 @@ async def lifespan(_app: FastAPI):
     logger.info("服务资源已释放")
 
 
+def _patch_openapi_file_fields(schema: dict) -> None:
+    """Swagger UI 仍依赖 format:binary 才显示「选择文件」按钮。
+
+    FastAPI 0.129+ 对 UploadFile 只输出 contentMediaType，会导致文档页变成普通文本框。
+    这里同时补上 format:binary，兼容 Swagger UI。
+    """
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("contentMediaType") == "application/octet-stream":
+                node.setdefault("type", "string")
+                node["format"] = "binary"
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(schema)
+
+
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     lifespan=lifespan,
 )
+
+
+def custom_openapi() -> dict:
+    """生成 OpenAPI，并修复文件上传字段在 /docs 中的展示。"""
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        routes=app.routes,
+    )
+    _patch_openapi_file_fields(schema)
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi  # type: ignore[method-assign]
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,4 +112,3 @@ app.include_router(conversations.router)
 app.include_router(messages.router)
 app.include_router(knowledge_bases.router)
 app.include_router(admin.router)
-

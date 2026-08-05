@@ -107,6 +107,8 @@ class DocumentItem(BaseModel):
     file_path: str
     file_size: int
     status: str
+    # 详情可带回解析全文；列表接口通常也为完整模型字段
+    full_text: str | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -88,6 +88,7 @@ app/
 ├── services/                # 服务层：业务逻辑 + AI 编排
 │   ├── user_service.py
 │   ├── knowledge_service.py
+│   ├── document_parser/     # 文档解析策略（pdf/docx/txt/md）
 │   ├── chat_service.py
 │   ├── code_assist_service.py
 │   ├── doc_generator_service.py
@@ -640,24 +641,45 @@ MILVUS_COLLECTION=document_chunks
 | 字段 | 说明 |
 |------|------|
 | `kb_id` | 知识库 ID |
-| `file` | 文档文件（`pdf` / `docx` / `md` / `txt`） |
+| `file` | 文档文件（`pdf` / `docx` / `md` / `txt`），**单文件 ≤ 20MB** |
 
 处理流程：
 
 1. 校验知识库属于当前团队  
 2. 在 `documents` 表新增记录，`status=uploading`  
-3. 文件保存到本地 `uploads/{team_id}/{kb_id}/`  
-4. 成功则 `status=uploaded`；存盘失败则 `status=failed`  
-5. **TODO**：文档解析（切块 / Embedding），后续开发
+3. 文件保存到本地 `uploads/{team_id}/{kb_id}/`，随后 `status=parsing`  
+4. **按文件类型走策略模式解析**（PDF / Word / TXT / Markdown 各自独立策略）  
+5. 解析全文写入 `documents.full_text`，成功则 `status=completed`；失败则 `status=failed`  
+6. **后续**：切块 / Embedding / 写入向量库（当前未做）
+
+> Swagger `/docs` 说明：若 `file` 变成普通文本框无法选文件，请重启服务后强刷页面（Ctrl+F5）。项目已在 OpenAPI 中补回 `format: binary`，以兼容 Swagger UI。
 
 成功响应 `201`，`data` 示例：`{"id": 1}`，`message` 为「上传成功」。
+
+解析失败时返回 `400`，`message` 为具体原因（如加密 PDF、损坏的 Word 等）。
 
 相关环境变量：
 
 ```env
 UPLOAD_DIR=uploads
-UPLOAD_MAX_BYTES=52428800
+UPLOAD_MAX_BYTES=20971520
 ```
+
+若数据库已有 `documents` 表但没有 `full_text` 列，请执行：
+
+```bash
+# MySQL 中执行
+source scripts/add_documents_full_text.sql
+```
+
+或手动：
+
+```sql
+ALTER TABLE documents
+  ADD COLUMN full_text LONGTEXT NULL COMMENT '文档解析全文' AFTER file_size;
+```
+
+解析策略目录：`app/services/document_parser/`（工厂按 `file_type` 选择策略）。
 
 #### 文档详情 `POST /api/v1/knowledge-bases/getDocumentById`
 
@@ -675,11 +697,14 @@ UPLOAD_MAX_BYTES=52428800
   "file_type": "pdf",
   "file_path": "uploads/1/1/xxx_需求说明.pdf",
   "file_size": 1024,
-  "status": "uploaded",
+  "status": "completed",
+  "full_text": "……解析后的全文……",
   "created_at": "2026-08-05T10:00:00",
   "updated_at": "2026-08-05T10:00:00"
 }
 ```
+
+- 详情接口返回 `full_text`；分页列表不返回全文（`full_text` 为 `null`），避免大字段拖慢列表
 
 #### 文档分页列表 `POST /api/v1/knowledge-bases/pageDocuments`
 
@@ -830,20 +855,23 @@ summary = await summarize_messages(messages)
 - [x] 发起对话（`POST /api/v1/message/chat`）  
 - [x] 对话历史摘要 LangChain Tool（`summarize_conversation_history_tool`）  
 - [x] 知识库 CRUD（`/api/v1/knowledge-bases`：创建/分页/详情/修改/删除，删除前清 Milvus）  
-- [x] 知识库文档接口（上传/详情/分页/软删除；解析留 TODO）  
+- [x] 知识库文档接口（上传/详情/分页/软删除；策略模式解析全文入库；切片/向量化后续）  
 
 ### 建议下一步
 
 1. 配好本机 MySQL，用 Alembic 做正式建表迁移  
 2. 接入百炼 `DASHSCOPE_API_KEY`，打通真正的问答链路  
-3. 知识库文档解析、切块与 Embedding 入库  
+3. 知识库文档切块与 Embedding 入库（Milvus）  
 4. 与前端 `dev-smart-assistant-frontend` 联调登录与流式对话  
 
 ### 已知注意点
 
 - 部分 AI / RAG 仍为占位实现；知识库删除已真实调用 Milvus（Collection 不存在时跳过清理）  
+- 上传文档后仅完成「解析全文 → 写入 `documents.full_text`」；切块与向量化尚未接入  
+- 扫描版 PDF（纯图片）可能解析出空文本，需后续 OCR 增强  
 - 启动健康检查与各模块 `/status` **不依赖** MySQL；带 `DbSession` 的接口在真正执行 SQL 前一般也不会立刻连库，但正式业务开发前请先配好 `.env` 中的 `DATABASE_URL`  
 - Python 本机若是 3.13，满足「3.12+」要求；团队若统一 3.12，可在虚拟环境中指定 3.12 解释器  
+- 若启动报 `ModuleNotFoundError`，请在已激活的 `.venv` 中执行 `pip install -r requirements.txt`。对话相关还依赖 `langchain-core`、`langchain-qwq`、`openai`（已写入 requirements.txt）；文档解析依赖 `pypdf`、`python-docx`  
 
 ---
 
