@@ -50,6 +50,18 @@ class MessageContentType(str, enum.Enum):
     code = "code"
 
 
+class DocumentStatus(str, enum.Enum):
+    """文档处理状态。"""
+
+    uploading = "uploading"
+    uploaded = "uploaded"
+    parsing = "parsing"
+    completed = "completed"
+    failed = "failed"
+    deleting = "deleting"
+    deleted = "deleted"
+
+
 class Team(Base):
     """团队：数据隔离的基本单位。"""
 
@@ -151,6 +163,40 @@ class KnowledgeBase(Base):
     )
 
     team = relationship("Team", back_populates="knowledge_bases")
+    documents = relationship("Document", back_populates="knowledge_base")
+
+
+class Document(Base):
+    """知识库文档：上传文件与解析状态。"""
+
+    __tablename__ = "documents"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    knowledge_base_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("knowledge_bases.id"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    file_size: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    status: Mapped[DocumentStatus] = mapped_column(
+        Enum(
+            DocumentStatus,
+            values_callable=lambda statuses: [item.value for item in statuses],
+        ),
+        nullable=False,
+        server_default=DocumentStatus.uploading.value,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        server_onupdate=func.now(),
+    )
+
+    knowledge_base = relationship("KnowledgeBase", back_populates="documents")
 
 
 class Conversation(Base):

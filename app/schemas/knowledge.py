@@ -1,4 +1,4 @@
-"""知识库请求与响应模型。"""
+"""知识库与文档请求/响应模型。"""
 
 from datetime import datetime
 
@@ -74,5 +74,52 @@ class KnowledgePageData(BaseModel):
     """分页列表。"""
 
     items: list[KnowledgeItem]
+    total: int
+    page: int
+
+
+class DocumentIdRequest(BaseModel):
+    """按文档 ID 操作（详情/删除）。"""
+
+    document_id: int = Field(..., ge=1, description="文档 ID")
+
+
+class DocumentPageRequest(BaseModel):
+    """分页查询知识库下的文档。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    kb_id: int = Field(..., ge=1, description="知识库 ID")
+    page: int = Field(default=1, ge=1, description="页码，从 1 开始")
+    page_size: int = Field(
+        default=20, ge=1, le=100, alias="pageSize", description="每页条数"
+    )
+    keyword: str | None = Field(default=None, description="按标题模糊搜索")
+
+
+class DocumentItem(BaseModel):
+    """文档详情/列表项。"""
+
+    id: int
+    knowledge_base_id: int
+    title: str
+    file_type: str
+    file_path: str
+    file_size: int
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentCreateData(BaseModel):
+    """上传成功返回标识。"""
+
+    id: int
+
+
+class DocumentPageData(BaseModel):
+    """文档分页列表。"""
+
+    items: list[DocumentItem]
     total: int
     page: int

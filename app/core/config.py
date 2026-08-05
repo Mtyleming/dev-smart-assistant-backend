@@ -69,6 +69,16 @@ class Settings(BaseSettings):
         default="document_chunks",
         validation_alias=AliasChoices("MILVUS_COLLECTION"),
     )
+    # 知识库文档本地存储目录
+    upload_dir: str = Field(
+        default="uploads",
+        validation_alias=AliasChoices("UPLOAD_DIR"),
+    )
+    # 单文件最大上传体积（字节），默认 50MB
+    upload_max_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        validation_alias=AliasChoices("UPLOAD_MAX_BYTES"),
+    )
 
 
 @lru_cache

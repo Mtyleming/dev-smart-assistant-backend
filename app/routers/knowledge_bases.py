@@ -1,11 +1,18 @@
 """知识库模块路由：/api/v1/knowledge-bases。"""
 
-from fastapi import APIRouter
+from typing import Annotated
+
+from fastapi import APIRouter, File, Form, UploadFile
 
 from app.core.config import settings
 from app.dependencies import CurrentTeamAdminOrLead, CurrentUser, DbSession
 from app.schemas.common import ApiResponse, ModuleStatus
 from app.schemas.knowledge import (
+    DocumentCreateData,
+    DocumentIdRequest,
+    DocumentItem,
+    DocumentPageData,
+    DocumentPageRequest,
     KnowledgeCreateData,
     KnowledgeCreateRequest,
     KnowledgeIdRequest,
@@ -97,4 +104,62 @@ async def delete_knowledge_base(
     user: CurrentTeamAdminOrLead,
 ) -> ApiResponse[None]:
     await knowledge_service.delete(db, user, body)
+    return ApiResponse(message="删除成功")
+
+
+@router.post(
+    "/createDocuments",
+    response_model=ApiResponse[DocumentCreateData],
+    summary="上传文档",
+    status_code=201,
+)
+async def create_documents(
+    db: DbSession,
+    user: CurrentTeamAdminOrLead,
+    kb_id: Annotated[int, Form(description="知识库 ID")],
+    file: Annotated[UploadFile, File(description="文档文件")],
+) -> ApiResponse[DocumentCreateData]:
+    data = await knowledge_service.create_document(db, user, kb_id=kb_id, file=file)
+    return ApiResponse(message="上传成功", data=data)
+
+
+@router.post(
+    "/getDocumentById",
+    response_model=ApiResponse[DocumentItem],
+    summary="获取文档详情",
+)
+async def get_document_by_id(
+    body: DocumentIdRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> ApiResponse[DocumentItem]:
+    data = await knowledge_service.get_document_by_id(db, user, body)
+    return ApiResponse(data=data)
+
+
+@router.post(
+    "/pageDocuments",
+    response_model=ApiResponse[DocumentPageData],
+    summary="分页查询知识库文档",
+)
+async def page_documents(
+    body: DocumentPageRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> ApiResponse[DocumentPageData]:
+    data = await knowledge_service.page_documents(db, user, body)
+    return ApiResponse(data=data)
+
+
+@router.post(
+    "/deleteDocumentById",
+    response_model=ApiResponse[None],
+    summary="删除文档",
+)
+async def delete_document_by_id(
+    body: DocumentIdRequest,
+    db: DbSession,
+    user: CurrentTeamAdminOrLead,
+) -> ApiResponse[None]:
+    await knowledge_service.delete_document_by_id(db, user, body)
     return ApiResponse(message="删除成功")

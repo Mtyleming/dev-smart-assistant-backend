@@ -1,14 +1,28 @@
-"""知识库业务逻辑。"""
+"""知识库业务逻辑（含文档上传/查询/删除）。"""
 
 from typing import Any
 
+from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, NotFoundError
-from app.models.base_models import KnowledgeBase
+from app.core.config import settings
+from app.core.exceptions import AppException, ConflictError, NotFoundError
+from app.core.file_storage import (
+    build_relative_path,
+    resolve_file_type,
+    save_upload_file,
+    title_from_filename,
+)
+from app.models.base_models import Document, DocumentStatus, KnowledgeBase
+from app.repositories.document_repo import document_repo
 from app.repositories.knowledge_repo import knowledge_repo
 from app.repositories.vector_repo import vector_repo
 from app.schemas.knowledge import (
+    DocumentCreateData,
+    DocumentIdRequest,
+    DocumentItem,
+    DocumentPageData,
+    DocumentPageRequest,
     KnowledgeCreateData,
     KnowledgeCreateRequest,
     KnowledgeIdRequest,
@@ -28,6 +42,20 @@ def _to_item(kb: KnowledgeBase) -> KnowledgeItem:
         created_by=kb.created_by,
         created_at=kb.created_at,
         updated_at=kb.updated_at,
+    )
+
+
+def _to_document_item(doc: Document) -> DocumentItem:
+    return DocumentItem(
+        id=doc.id,
+        knowledge_base_id=doc.knowledge_base_id,
+        title=doc.title,
+        file_type=doc.file_type,
+        file_path=doc.file_path,
+        file_size=doc.file_size,
+        status=doc.status.value if hasattr(doc.status, "value") else str(doc.status),
+        created_at=doc.created_at,
+        updated_at=doc.updated_at,
     )
 
 
@@ -155,6 +183,129 @@ class KnowledgeService:
             db, self._team_id(user), page=1, page_size=1000
         )
         return [_to_item(kb) for kb in items]
+
+    async def create_document(
+        self,
+        db: AsyncSession,
+        user: dict[str, Any],
+        *,
+        kb_id: int,
+        file: UploadFile,
+    ) -> DocumentCreateData:
+        """上传文档：先落库 uploading，存盘后改为 uploaded；解析留 TODO。"""
+        team_id = self._team_id(user)
+        kb = await knowledge_repo.get_by_id_and_team(db, kb_id, team_id)
+        if not kb:
+            raise NotFoundError("知识库不存在")
+
+        file_type = resolve_file_type(file.filename)
+        if not file_type:
+            raise AppException(
+                code=40001,
+                message="不支持的文件类型，仅支持 pdf/docx/md/txt",
+                status_code=400,
+            )
+
+        content = await file.read()
+        if not content:
+            raise AppException(code=40002, message="文件内容为空", status_code=400)
+        if len(content) > settings.upload_max_bytes:
+            raise AppException(
+                code=40003,
+                message=f"文件过大，最大允许 {settings.upload_max_bytes} 字节",
+                status_code=400,
+            )
+
+        title = title_from_filename(file.filename)
+        relative_path = build_relative_path(team_id, kb_id, file.filename)
+
+        doc = await document_repo.create(
+            db,
+            knowledge_base_id=kb_id,
+            title=title,
+            file_type=file_type,
+            file_path=relative_path,
+            file_size=0,
+            status=DocumentStatus.uploading,
+        )
+        await db.commit()
+
+        try:
+            file_size = await save_upload_file(relative_path, content)
+            await document_repo.update_file_meta(
+                db,
+                doc,
+                file_size=file_size,
+                status=DocumentStatus.uploaded,
+            )
+            await db.commit()
+
+            # TODO: 文档解析（切块 / Embedding / 入库），期间可将 status 置为 parsing
+            # await document_parse_service.parse(doc.id)
+
+        except Exception:
+            await document_repo.update_file_meta(
+                db, doc, status=DocumentStatus.failed
+            )
+            await db.commit()
+            raise AppException(
+                code=50001, message="文件保存失败", status_code=500
+            ) from None
+
+        return DocumentCreateData(id=doc.id)
+
+    async def get_document_by_id(
+        self,
+        db: AsyncSession,
+        user: dict[str, Any],
+        body: DocumentIdRequest,
+    ) -> DocumentItem:
+        doc = await document_repo.get_by_id_and_team(
+            db, body.document_id, self._team_id(user)
+        )
+        if not doc:
+            raise NotFoundError("文档不存在")
+        return _to_document_item(doc)
+
+    async def page_documents(
+        self,
+        db: AsyncSession,
+        user: dict[str, Any],
+        body: DocumentPageRequest,
+    ) -> DocumentPageData:
+        team_id = self._team_id(user)
+        kb = await knowledge_repo.get_by_id_and_team(db, body.kb_id, team_id)
+        if not kb:
+            raise NotFoundError("知识库不存在")
+
+        keyword = body.keyword.strip() if body.keyword else None
+        items, total = await document_repo.page_by_kb(
+            db,
+            knowledge_base_id=body.kb_id,
+            team_id=team_id,
+            page=body.page,
+            page_size=body.page_size,
+            keyword=keyword or None,
+        )
+        return DocumentPageData(
+            items=[_to_document_item(doc) for doc in items],
+            total=total,
+            page=body.page,
+        )
+
+    async def delete_document_by_id(
+        self,
+        db: AsyncSession,
+        user: dict[str, Any],
+        body: DocumentIdRequest,
+    ) -> None:
+        doc = await document_repo.get_by_id_and_team(
+            db, body.document_id, self._team_id(user)
+        )
+        if not doc:
+            raise NotFoundError("文档不存在")
+        await document_repo.soft_delete(db, doc)
+        await db.commit()
 
 
 knowledge_service = KnowledgeService()

@@ -631,6 +631,80 @@ MILVUS_COLLECTION=document_chunks
 - 成功响应 `message` 为「删除成功」
 - Milvus 清理失败时返回 `503`，message 为「向量数据清理失败，知识库未删除」
 
+#### 上传文档 `POST /api/v1/knowledge-bases/createDocuments`
+
+请求类型：`multipart/form-data`，权限：**admin**、**tech_lead**。
+
+表单字段：
+
+| 字段 | 说明 |
+|------|------|
+| `kb_id` | 知识库 ID |
+| `file` | 文档文件（`pdf` / `docx` / `md` / `txt`） |
+
+处理流程：
+
+1. 校验知识库属于当前团队  
+2. 在 `documents` 表新增记录，`status=uploading`  
+3. 文件保存到本地 `uploads/{team_id}/{kb_id}/`  
+4. 成功则 `status=uploaded`；存盘失败则 `status=failed`  
+5. **TODO**：文档解析（切块 / Embedding），后续开发
+
+成功响应 `201`，`data` 示例：`{"id": 1}`，`message` 为「上传成功」。
+
+相关环境变量：
+
+```env
+UPLOAD_DIR=uploads
+UPLOAD_MAX_BYTES=52428800
+```
+
+#### 文档详情 `POST /api/v1/knowledge-bases/getDocumentById`
+
+权限：当前团队任意成员。请求体：`{"document_id": 1}`
+
+- 不存在、已软删或不属于当前团队时返回 `404`，message 为「文档不存在」
+
+成功 `data` 示例：
+
+```json
+{
+  "id": 1,
+  "knowledge_base_id": 1,
+  "title": "需求说明.pdf",
+  "file_type": "pdf",
+  "file_path": "uploads/1/1/xxx_需求说明.pdf",
+  "file_size": 1024,
+  "status": "uploaded",
+  "created_at": "2026-08-05T10:00:00",
+  "updated_at": "2026-08-05T10:00:00"
+}
+```
+
+#### 文档分页列表 `POST /api/v1/knowledge-bases/pageDocuments`
+
+权限：当前团队任意成员。请求体：
+
+```json
+{
+  "kb_id": 1,
+  "page": 1,
+  "pageSize": 20,
+  "keyword": "需求"
+}
+```
+
+- 仅返回该知识库下、且未软删（`status != deleted`）的文档
+- `keyword` 可选，按标题模糊搜索
+- 排序：`updated_at` 降序
+
+#### 删除文档 `POST /api/v1/knowledge-bases/deleteDocumentById`
+
+权限：**admin**、**tech_lead**。请求体：`{"document_id": 1}`
+
+- 软删除：将 `status` 改为 `deleted`（本地文件本次保留）
+- 成功响应 `message` 为「删除成功」
+
 ### 发起对话 `POST /api/v1/messages/chat`
 
 请求头需携带 `Authorization: Bearer <access_token>`。
@@ -756,12 +830,13 @@ summary = await summarize_messages(messages)
 - [x] 发起对话（`POST /api/v1/message/chat`）  
 - [x] 对话历史摘要 LangChain Tool（`summarize_conversation_history_tool`）  
 - [x] 知识库 CRUD（`/api/v1/knowledge-bases`：创建/分页/详情/修改/删除，删除前清 Milvus）  
+- [x] 知识库文档接口（上传/详情/分页/软删除；解析留 TODO）  
 
 ### 建议下一步
 
 1. 配好本机 MySQL，用 Alembic 做正式建表迁移  
 2. 接入百炼 `DASHSCOPE_API_KEY`，打通真正的问答链路  
-3. 知识库文档上传、切块与 Embedding 入库  
+3. 知识库文档解析、切块与 Embedding 入库  
 4. 与前端 `dev-smart-assistant-frontend` 联调登录与流式对话  
 
 ### 已知注意点

@@ -3,6 +3,8 @@
 from app.models.base_models import (
     Conversation,
     ConversationMode,
+    Document,
+    DocumentStatus,
     KnowledgeBase,
     Message,
     MessageContentType,
@@ -19,6 +21,8 @@ __all__ = [
     "TeamMember",
     "TeamMemberRole",
     "KnowledgeBase",
+    "Document",
+    "DocumentStatus",
     "Conversation",
     "ConversationMode",
     "Message",
