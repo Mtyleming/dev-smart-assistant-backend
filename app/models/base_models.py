@@ -200,6 +200,46 @@ class Document(Base):
     )
 
     knowledge_base = relationship("KnowledgeBase", back_populates="documents")
+    chunks = relationship("DocumentChunk", back_populates="document")
+
+
+class DocumentChunk(Base):
+    """文档切块：切片原文落 MySQL；向量存 Milvus。"""
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id", "chunk_index", name="uk_document_chunk_index"
+        ),
+        UniqueConstraint("chunk_id", name="uk_document_chunk_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chunk_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    document_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("documents.id"), nullable=False, index=True
+    )
+    chunk_index: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content: Mapped[str] = mapped_column(LONGTEXT, nullable=False)
+    # 兼容库中已有字段
+    token_count: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0"
+    )
+    collection_name: Mapped[str] = mapped_column(
+        String(100), nullable=False, server_default="document_chunks"
+    )
+    vector_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    knowledge_base_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("knowledge_bases.id"), nullable=False, index=True
+    )
+    team_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("teams.id"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+
+    document = relationship("Document", back_populates="chunks")
 
 
 class Conversation(Base):

@@ -89,11 +89,13 @@ app/
 │   ├── user_service.py
 │   ├── knowledge_service.py
 │   ├── document_parser/     # 文档解析策略（pdf/docx/txt/md）
+│   ├── document_chunker.py  # 文档切片（RecursiveCharacterTextSplitter）
+│   ├── document_index_service.py  # 切块→向量化→Milvus 编排
 │   ├── chat_service.py
 │   ├── code_assist_service.py
 │   ├── doc_generator_service.py
 │   └── ai/                  # AI 只出现在这里
-│       ├── llm_client.py    # 百炼大模型封装
+│       ├── llm_client.py    # 百炼大模型 / Embedding 封装
 │       ├── conversation_summary.py  # 对话历史摘要工具
 │       ├── rag_pipeline.py  # RAG 检索链路
 │       └── agent_graph.py   # LangGraph 状态机
@@ -542,13 +544,32 @@ SUPER_ADMIN_USER_ID=15
 
 知识库归属 **Token 当前团队**；创建/修改/删除仅 **admin**、**tech_lead** 可操作，列表与详情对全体成员开放。
 
-删除时先按 `knowledge_base_id + team_id` 清理 Milvus 向量，成功后再删 MySQL；向量清理失败则整次失败，库记录保留。
+删除时先按 `knowledge_base_id + team_id` 清理 Milvus 向量与 MySQL `document_chunks`，成功后再删 MySQL 知识库；向量清理失败则整次失败，库记录保留。
+
+**上传文档前请先启动 Milvus**（否则切片/向量化成功后会在写入阶段返回 503）。
+
+本地常用两种方式（二选一）：
+
+1. **milvus-server**（你当前用法）  
+   ```bash
+   milvus-server --data D:\milvus_data
+   ```
+2. **Docker**  
+   ```bash
+   docker compose -f docker-compose.milvus.yml up -d
+   ```
+
+确认 `.env` 中 `MILVUS_URI=http://127.0.0.1:19530` 后，再上传/删除文档。  
+说明：本地 `milvus-server` 删除时只支持主键，代码已改为「先按条件查出 id，再按 id 删除」。
 
 相关环境变量（见 `.env.example`）：
 
 ```env
 MILVUS_URI=http://127.0.0.1:19530
 MILVUS_COLLECTION=document_chunks
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSIONS=1024
+EMBEDDING_BATCH_SIZE=10
 ```
 
 #### 创建知识库 `POST /api/v1/knowledge-bases/create`
@@ -650,19 +671,29 @@ MILVUS_COLLECTION=document_chunks
 3. 文件保存到本地 `uploads/{team_id}/{kb_id}/`，随后 `status=parsing`  
 4. **按文件类型走策略模式解析**（PDF / Word / TXT / Markdown 各自独立策略）  
 5. 解析全文写入 `documents.full_text`，成功则 `status=completed`；失败则 `status=failed`  
-6. **后续**：切块 / Embedding / 写入向量库（当前未做）
+6. **切片 → 写入 MySQL `document_chunks` → Embedding → 写入 Milvus**（内部解耦，不新增对外接口）  
+   - 切片：`RecursiveCharacterTextSplitter`，512 tokens / 重叠 64 tokens  
+   - MySQL：存 `chunk_id`、`document_id`、`chunk_index`、`content`、`knowledge_base_id`、`team_id`  
+   - 向量化：百炼 `text-embedding-v4`（默认 1024 维，每批最多 10 条）  
+   - Milvus：另存向量及同样的切块元数据字段  
+   - 切片/向量化/写入失败时文档改为 `failed`，并返回错误  
 
 > Swagger `/docs` 说明：若 `file` 变成普通文本框无法选文件，请重启服务后强刷页面（Ctrl+F5）。项目已在 OpenAPI 中补回 `format: binary`，以兼容 Swagger UI。
 
 成功响应 `201`，`data` 示例：`{"id": 1}`，`message` 为「上传成功」。
 
-解析失败时返回 `400`，`message` 为具体原因（如加密 PDF、损坏的 Word 等）。
+解析失败时返回 `400`，`message` 为具体原因（如加密 PDF、损坏的 Word 等）。  
+向量化或写入 Milvus 失败时返回 `503`。
 
 相关环境变量：
 
 ```env
 UPLOAD_DIR=uploads
 UPLOAD_MAX_BYTES=20971520
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSIONS=1024
+MILVUS_URI=http://127.0.0.1:19530
+MILVUS_COLLECTION=document_chunks
 ```
 
 若数据库已有 `documents` 表但没有 `full_text` 列，请执行：
@@ -679,7 +710,21 @@ ALTER TABLE documents
   ADD COLUMN full_text LONGTEXT NULL COMMENT '文档解析全文' AFTER file_size;
 ```
 
-解析策略目录：`app/services/document_parser/`（工厂按 `file_type` 选择策略）。
+若还没有 `document_chunks` 表，请执行：
+
+```bash
+source scripts/create_document_chunks.sql
+```
+
+若表已存在但是旧结构（缺少 `chunk_id` / `knowledge_base_id` / `team_id`），请执行：
+
+```bash
+.\.venv\Scripts\python.exe scripts\migrate_document_chunks.py
+```
+
+或手动执行 [`scripts/alter_document_chunks_add_fields.sql`](scripts/alter_document_chunks_add_fields.sql)。
+解析策略目录：`app/services/document_parser/`（工厂按 `file_type` 选择策略）。  
+切片：`app/services/document_chunker.py`；索引编排：`app/services/document_index_service.py`。
 
 #### 文档详情 `POST /api/v1/knowledge-bases/getDocumentById`
 
@@ -727,7 +772,8 @@ ALTER TABLE documents
 
 权限：**admin**、**tech_lead**。请求体：`{"document_id": 1}`
 
-- 软删除：将 `status` 改为 `deleted`（本地文件本次保留）
+- 先按 `document_id + team_id` 清理 Milvus 向量与 MySQL `document_chunks`，成功后再软删除（`status` 改为 `deleted`）；本地文件本次保留  
+- 向量清理失败时返回 `503`，message 为「向量数据清理失败，文档未删除」，MySQL 记录不变  
 - 成功响应 `message` 为「删除成功」
 
 ### 发起对话 `POST /api/v1/messages/chat`
@@ -855,23 +901,25 @@ summary = await summarize_messages(messages)
 - [x] 发起对话（`POST /api/v1/message/chat`）  
 - [x] 对话历史摘要 LangChain Tool（`summarize_conversation_history_tool`）  
 - [x] 知识库 CRUD（`/api/v1/knowledge-bases`：创建/分页/详情/修改/删除，删除前清 Milvus）  
-- [x] 知识库文档接口（上传/详情/分页/软删除；策略模式解析全文入库；切片/向量化后续）  
+- [x] 知识库文档接口（上传/详情/分页/软删除；策略模式解析全文入库）  
+- [x] 知识库文档切块与 Embedding 入库（Milvus；切片与向量化解耦）  
 
 ### 建议下一步
 
 1. 配好本机 MySQL，用 Alembic 做正式建表迁移  
 2. 接入百炼 `DASHSCOPE_API_KEY`，打通真正的问答链路  
-3. 知识库文档切块与 Embedding 入库（Milvus）  
+3. 实现 RAG 向量检索（`vector_repo.search`）并接到智能问答  
 4. 与前端 `dev-smart-assistant-frontend` 联调登录与流式对话  
 
 ### 已知注意点
 
-- 部分 AI / RAG 仍为占位实现；知识库删除已真实调用 Milvus（Collection 不存在时跳过清理）  
-- 上传文档后仅完成「解析全文 → 写入 `documents.full_text`」；切块与向量化尚未接入  
-- 扫描版 PDF（纯图片）可能解析出空文本，需后续 OCR 增强  
+- 部分 AI / RAG 检索仍为占位实现；文档上传已完成切块与 Embedding 入库；知识库/文档删除会清理对应 Milvus 向量（Collection 不存在时跳过清理）  
+- 扫描版 PDF（纯图片）可能解析出空文本，需后续 OCR 增强；空文本会跳过向量写入  
 - 启动健康检查与各模块 `/status` **不依赖** MySQL；带 `DbSession` 的接口在真正执行 SQL 前一般也不会立刻连库，但正式业务开发前请先配好 `.env` 中的 `DATABASE_URL`  
 - Python 本机若是 3.13，满足「3.12+」要求；团队若统一 3.12，可在虚拟环境中指定 3.12 解释器  
-- 若启动报 `ModuleNotFoundError`，请在已激活的 `.venv` 中执行 `pip install -r requirements.txt`。对话相关还依赖 `langchain-core`、`langchain-qwq`、`openai`（已写入 requirements.txt）；文档解析依赖 `pypdf`、`python-docx`  
+- 若启动报 `ModuleNotFoundError`，请在已激活的 `.venv` 中执行 `pip install -r requirements.txt`。对话相关还依赖 `langchain-core`、`langchain-qwq`、`openai`；文档切片依赖 `langchain-text-splitters`、`tiktoken`；文档解析依赖 `pypdf`、`python-docx`  
+- **Cursor 全局 MySQL MCP**：已在 `%USERPROFILE%\.cursor\mcp.json` 配置 `@kyruntime/mysql-mcp`，连接本机 `127.0.0.1:3306`（默认库 `dev_assistant`）。修改账号后需在 Cursor 的 **Settings → MCP** 里刷新/重启该服务；写操作默认关闭（只读查询更安全）  
+
 
 ---
 

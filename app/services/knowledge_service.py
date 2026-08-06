@@ -14,9 +14,11 @@ from app.core.file_storage import (
     title_from_filename,
 )
 from app.models.base_models import Document, DocumentStatus, KnowledgeBase
+from app.repositories.document_chunk_repo import document_chunk_repo
 from app.repositories.document_repo import document_repo
 from app.repositories.knowledge_repo import knowledge_repo
 from app.repositories.vector_repo import vector_repo
+from app.services.document_index_service import document_index_service
 from app.schemas.knowledge import (
     DocumentCreateData,
     DocumentIdRequest,
@@ -170,8 +172,11 @@ class KnowledgeService:
         if not kb:
             raise NotFoundError("知识库不存在")
 
-        # 先清向量；失败则抛错，不执行下方 delete / commit
-        #await vector_repo.delete_by_knowledge_base(team_id, kb.id)
+        # 先清向量与 MySQL 切块；失败则抛错，不执行下方 delete / commit
+        await vector_repo.delete_by_knowledge_base(team_id, kb.id)
+        await document_chunk_repo.delete_by_knowledge_base(
+            db, knowledge_base_id=kb.id, team_id=team_id
+        )
         await knowledge_repo.delete(db, kb)
         await db.commit()
 
@@ -196,8 +201,7 @@ class KnowledgeService:
     ) -> DocumentCreateData:
         """上传文档：落盘后按策略解析全文并写入 documents.full_text。
 
-        流程：uploading → 存盘 → parsing → completed（失败则为 failed）。
-        切片与向量化后续再做。
+        流程：uploading → 存盘 → parsing → 切片/向量化 → completed（失败则为 failed）。
         """
         team_id = self._team_id(user)
         kb = await knowledge_repo.get_by_id_and_team(db, kb_id, team_id)
@@ -266,8 +270,28 @@ class KnowledgeService:
             )
             await db.commit()
 
-            # 后续开发：切块 / Embedding / 写入 Milvus
-            # await document_chunk_service.chunk_and_embed(doc.id)
+            try:
+                await document_index_service.index_document(
+                    db,
+                    document_id=doc.id,
+                    knowledge_base_id=kb_id,
+                    team_id=team_id,
+                    full_text=full_text,
+                )
+            except AppException:
+                await document_repo.update_file_meta(
+                    db, doc, status=DocumentStatus.failed
+                )
+                await db.commit()
+                raise
+            except Exception:
+                await document_repo.update_file_meta(
+                    db, doc, status=DocumentStatus.failed
+                )
+                await db.commit()
+                raise AppException(
+                    code=50303, message="文档向量化失败", status_code=503
+                ) from None
 
         except DocumentParseError as exc:
             await document_repo.update_file_meta(
@@ -277,6 +301,8 @@ class KnowledgeService:
             raise AppException(
                 code=40004, message=exc.message, status_code=400
             ) from None
+        except AppException:
+            raise
         except Exception:
             await document_repo.update_file_meta(
                 db, doc, status=DocumentStatus.failed
@@ -333,11 +359,17 @@ class KnowledgeService:
         user: dict[str, Any],
         body: DocumentIdRequest,
     ) -> None:
+        team_id = self._team_id(user)
         doc = await document_repo.get_by_id_and_team(
-            db, body.document_id, self._team_id(user)
+            db, body.document_id, team_id
         )
         if not doc:
             raise NotFoundError("文档不存在")
+        # 先清向量与 MySQL 切块；失败则抛错，不执行下方软删 / commit
+        await vector_repo.delete_by_document(team_id, doc.id)
+        await document_chunk_repo.delete_by_document(
+            db, document_id=doc.id, team_id=team_id
+        )
         await document_repo.soft_delete(db, doc)
         await db.commit()
 

@@ -47,6 +47,21 @@ class Settings(BaseSettings):
         default="qwen3.7-plus",
         validation_alias=AliasChoices("LLM_MODEL", "DASHSCOPE_MODEL"),
     )
+    # 文本向量模型（百炼 text-embedding-v4）
+    embedding_model: str = Field(
+        default="text-embedding-v4",
+        validation_alias=AliasChoices("EMBEDDING_MODEL"),
+    )
+    # 向量维度（与 Milvus FLOAT_VECTOR dim 一致；v4 默认 1024）
+    embedding_dimensions: int = Field(
+        default=1024,
+        validation_alias=AliasChoices("EMBEDDING_DIMENSIONS"),
+    )
+    # 单次 Embedding 请求最大文本条数（百炼上限 10）
+    embedding_batch_size: int = Field(
+        default=10,
+        validation_alias=AliasChoices("EMBEDDING_BATCH_SIZE"),
+    )
 
     @field_validator("llm_api_key", mode="before")
     @classmethod
