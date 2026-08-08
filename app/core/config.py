@@ -1,16 +1,21 @@
 """应用配置：从环境变量读取，默认值适合本地开发。"""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# app/core/config.py → 项目根目录（保证无论从哪启动都能读到 .env）
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_ENV_FILE = _PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
     """全局配置项，修改 .env 即可生效，无需改代码。"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
     )
