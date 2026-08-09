@@ -17,12 +17,21 @@ class IntentRouteStrategy(ABC):
     node_name: str
 
     @abstractmethod
-    async def run(self, message: str, conversation_id: int) -> dict:
+    async def run(
+        self,
+        message: str,
+        conversation_id: int,
+        *,
+        team_id: int | None = None,
+        kb_ids: list[int] | None = None,
+    ) -> dict:
         """执行该意图对应的业务逻辑。
 
         Args:
             message: 用户当前消息。
             conversation_id: 对话 ID。
+            team_id: 团队 ID（知识库查询等场景需要）。
+            kb_ids: 可选知识库 ID 列表；空表示团队下全部知识库。
 
         Returns:
             纯数据结果字典，至少包含 answer / intent / status 等字段。

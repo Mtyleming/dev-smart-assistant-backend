@@ -15,8 +15,16 @@ class CodeRequestRouteStrategy(IntentRouteStrategy):
     intent = "code_request"
     node_name = "code"
 
-    async def run(self, message: str, conversation_id: int) -> dict:
+    async def run(
+        self,
+        message: str,
+        conversation_id: int,
+        *,
+        team_id: int | None = None,
+        kb_ids: list[int] | None = None,
+    ) -> dict:
         """占位：后续接入代码解读 / 生成 / 审查。"""
+        _ = (team_id, kb_ids)
         logger.info(
             "code_request 占位执行 conversation_id=%s message_len=%s",
             conversation_id,

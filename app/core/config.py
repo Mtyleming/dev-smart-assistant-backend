@@ -89,6 +89,11 @@ class Settings(BaseSettings):
         default="document_chunks",
         validation_alias=AliasChoices("MILVUS_COLLECTION"),
     )
+    # 文本重排模型（百炼 gte-rerank）
+    rerank_model: str = Field(
+        default="gte-rerank",
+        validation_alias=AliasChoices("RERANK_MODEL"),
+    )
     # 知识库文档本地存储目录
     upload_dir: str = Field(
         default="uploads",

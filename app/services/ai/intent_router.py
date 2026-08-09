@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -17,6 +17,8 @@ class IntentState(TypedDict):
     intent: str
     confidence: float
     result: dict
+    team_id: NotRequired[int | None]
+    kb_ids: NotRequired[list[int]]
 
 
 def route_by_intent(
@@ -27,9 +29,14 @@ def route_by_intent(
 
 
 async def _run_strategy_node(state: IntentState, intent: str) -> dict:
-    """统一节点执行：委托给对应意图策略（当前为占位）。"""
+    """统一节点执行：委托给对应意图策略。"""
     strategy = get_route_strategy(intent)
-    result = await strategy.run(state["message"], state["conversation_id"])
+    result = await strategy.run(
+        state["message"],
+        state["conversation_id"],
+        team_id=state.get("team_id"),
+        kb_ids=state.get("kb_ids") or [],
+    )
     return {"result": result}
 
 

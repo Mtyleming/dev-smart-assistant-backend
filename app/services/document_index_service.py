@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AppException
 from app.repositories.document_chunk_repo import document_chunk_repo
 from app.repositories.vector_repo import vector_repo
-from app.services.ai.llm_client import llm_client
+from app.services.ai.embedding_service import embedding_service
 from app.services.document_chunker import split_text
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ class DocumentIndexService:
 
         texts = [chunk.content for chunk in chunks]
         try:
-            vectors = await llm_client.embed(texts)
+            vectors = await embedding_service.embed(texts)
         except AppException:
             raise
         except Exception as exc:

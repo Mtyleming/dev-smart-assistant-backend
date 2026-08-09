@@ -15,8 +15,16 @@ class GeneralQaRouteStrategy(IntentRouteStrategy):
     intent = "general_qa"
     node_name = "general"
 
-    async def run(self, message: str, conversation_id: int) -> dict:
+    async def run(
+        self,
+        message: str,
+        conversation_id: int,
+        *,
+        team_id: int | None = None,
+        kb_ids: list[int] | None = None,
+    ) -> dict:
         """占位：后续接入通用大模型问答。"""
+        _ = (team_id, kb_ids)
         logger.info(
             "general_qa 占位执行 conversation_id=%s message_len=%s",
             conversation_id,

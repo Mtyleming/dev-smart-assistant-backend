@@ -91,18 +91,20 @@ app/
 │   ├── document_parser/     # 文档解析策略（pdf/docx/txt/md）
 │   ├── document_chunker.py  # 文档切片（RecursiveCharacterTextSplitter）
 │   ├── document_index_service.py  # 切块→向量化→Milvus 编排
+│   ├── reranker_service.py  # 百炼 gte-rerank 文本重排
 │   ├── chat_service.py
 │   ├── code_assist_service.py
 │   ├── doc_generator_service.py
-│   ├── route/               # 意图路由策略（策略模式占位）
+│   ├── route/               # 意图路由策略（策略模式）
 │   │   ├── base.py          # 策略接口
 │   │   ├── factory.py       # 按 intent 选择策略
-│   │   ├── knowledge_query_route.py  # 知识库查询 → rag
+│   │   ├── knowledge_query_route.py  # 知识库查询 → rag（已接 RAG）
 │   │   ├── general_qa_route.py       # 通用问答 → general
 │   │   ├── code_request_route.py     # 代码辅助 → code
 │   │   └── doc_generation_route.py   # 文档生成 → doc
 │   └── ai/                  # AI 只出现在这里
-│       ├── llm_client.py    # 百炼大模型 / Embedding 封装
+│       ├── llm_client.py    # 百炼大模型对话 / RAG 生成
+│       ├── embedding_service.py  # 文本向量化工具（上传与查询共用）
 │       ├── conversation_summary.py  # 对话历史摘要工具
 │       ├── intent_service.py        # 意图识别（四类意图）
 │       ├── intent_router.py         # LangGraph 四节点分发
@@ -683,7 +685,7 @@ EMBEDDING_BATCH_SIZE=10
 6. **切片 → 写入 MySQL `document_chunks` → Embedding → 写入 Milvus**（内部解耦，不新增对外接口）  
    - 切片：`RecursiveCharacterTextSplitter`，512 tokens / 重叠 64 tokens  
    - MySQL：存 `chunk_id`、`document_id`、`chunk_index`、`content`、`knowledge_base_id`、`team_id`  
-   - 向量化：百炼 `text-embedding-v4`（默认 1024 维，每批最多 10 条）  
+   - 向量化：`embedding_service`（百炼 `text-embedding-v4`，默认 1024 维，每批最多 10 条；与 RAG 查询共用）  
    - Milvus：另存向量及同样的切块元数据字段  
    - 切片/向量化/写入失败时文档改为 `failed`，并返回错误  
 
@@ -912,24 +914,48 @@ summary = await summarize_messages(messages)
 - [x] 知识库 CRUD（`/api/v1/knowledge-bases`：创建/分页/详情/修改/删除，删除前清 Milvus）  
 - [x] 知识库文档接口（上传/详情/分页/软删除；策略模式解析全文入库）  
 - [x] 知识库文档切块与 Embedding 入库（Milvus；切片与向量化解耦）  
+- [x] Embedding 工具类抽离（`embedding_service`，上传与 RAG 查询共用 `text-embedding-v4`）  
+- [x] RAG 检索链路（向量 Top5 → gte-rerank Top3 → 置信度 → 上下文组装 → 生成）  
 - [x] 意图识别（`intent_service`）+ LangGraph 四节点路由（`intent_router`）  
-- [x] 意图路由策略占位（`services/route/`，策略模式，后续再写真实 run）  
+- [x] 意图路由策略（`knowledge_query` 已接 RAG；其余三类仍为占位）  
 
 ### 意图识别与路由（当前）
 
-用户消息经 `classify_intent` 分为四类，再由 LangGraph 分发到对应节点；节点内用策略模式执行（目前为占位）：
+用户消息经 `classify_intent` 分为四类，再由 LangGraph 分发到对应节点；节点内用策略模式执行：
 
 | 意图 | LangGraph 节点 | 策略类 | 说明 |
 |------|----------------|--------|------|
-| `knowledge_query` | `rag` | `KnowledgeQueryRouteStrategy` | 查内部知识库 |
-| `general_qa` | `general` | `GeneralQaRouteStrategy` | 通用技术问答 |
-| `code_request` | `code` | `CodeRequestRouteStrategy` | 代码解读/生成/审查 |
-| `doc_generation` | `doc` | `DocGenerationRouteStrategy` | 生成技术文档 |
+| `knowledge_query` | `rag` | `KnowledgeQueryRouteStrategy` | 已接入 RAG 知识库查询 |
+| `general_qa` | `general` | `GeneralQaRouteStrategy` | 通用技术问答（占位） |
+| `code_request` | `code` | `CodeRequestRouteStrategy` | 代码解读/生成/审查（占位） |
+| `doc_generation` | `doc` | `DocGenerationRouteStrategy` | 生成技术文档（占位） |
 
 - API Key：使用 `.env` 的 `DASHSCOPE_API_KEY`（对应 `settings.llm_api_key`）  
-- 置信度 `< 0.7` 或解析失败时，回退为 `general_qa`  
+- 意图置信度 `< 0.7` 或解析失败时，回退为 `general_qa`  
 - 识别结果缓存 Redis：`intent:{conversation_id}:{msg_hash}`，TTL 300 秒  
-- 后续开发真实逻辑时，只需改各策略的 `run` 方法，不必改图结构  
+- `IntentState` 可传 `team_id`、`kb_ids`（空列表 = 查团队下全部知识库）  
+- **注意**：`POST /api/v1/message/chat` 目前仍直接走通用对话，**尚未**接入意图识别 / RAG；调用 RAG 需通过 `intent_graph` 或直接 `KnowledgeQueryRouteStrategy.run(..., team_id=...)`
+
+### RAG 知识库查询流程
+
+1. 用户问题经 `embedding_service`（`text-embedding-v4`，1024 维）向量化  
+2. Milvus 按 `team_id`（及可选 `kb_ids`）过滤，取向量相似 Top5  
+3. 百炼 `gte-rerank` 重排后取 Top3  
+4. 置信度（看 Top-1 的 Reranker 分数 + 多块一致性）：  
+   - **高**（≥ 0.8，且 Top-2/Top-3 均 ≥ 0.5）：正常 RAG 回答  
+   - **中**（0.5～0.8，或高分但不一致）：回答并提示「建议进一步确认」  
+   - **低**（&lt; 0.5 或无结果）：放弃检索，降级通用问答，并告知「知识库中未找到相关信息」  
+5. 上下文按相关性拼接，带来源元数据（`document_id`、`chunk_index`），总 Token ≤ 4000  
+
+相关环境变量：
+
+```env
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSIONS=1024
+RERANK_MODEL=gte-rerank
+MILVUS_URI=http://127.0.0.1:19530
+MILVUS_COLLECTION=document_chunks
+```
 
 用法示例：
 
@@ -942,18 +968,25 @@ from app.services.route import get_route_strategy
 result = await classify_intent(message, conversation_id, history, redis)
 # {"intent": "knowledge_query", "confidence": 0.92}
 
-# 2) LangGraph 分发（节点内自动调策略）
+# 2) LangGraph 分发（知识库查询需传 team_id；kb_ids 可选）
 final = await intent_graph.ainvoke({
     "message": message,
     "conversation_id": conversation_id,
     "intent": result["intent"],
     "confidence": result["confidence"],
     "result": {},
+    "team_id": team_id,
+    "kb_ids": [],  # 空 = 当前团队全部知识库
 })
 
 # 3) 也可直接按意图取策略
 strategy = get_route_strategy(result["intent"])
-data = await strategy.run(message, conversation_id)
+data = await strategy.run(
+    message,
+    conversation_id,
+    team_id=team_id,
+    kb_ids=[],
+)
 ```
 
 **本地怎么测意图识别（推荐）**
@@ -977,20 +1010,19 @@ python test/test_intent_classify.py --ask
 ### 建议下一步
 
 1. 配好本机 MySQL，用 Alembic 做正式建表迁移  
-2. 接入百炼 `DASHSCOPE_API_KEY`，打通真正的问答链路  
-3. 实现 RAG 向量检索（`vector_repo.search`）并接到 `KnowledgeQueryRouteStrategy.run`  
-4. 补全 `general` / `code` / `doc` 三个策略的真实 run 逻辑  
-5. 与前端 `dev-smart-assistant-frontend` 联调登录与流式对话  
+2. 将 `chat_service` 接入意图识别与 RAG（请求侧可选 `knowledge_base_id`）  
+3. 补全 `general` / `code` / `doc` 三个策略的真实 run 逻辑  
+4. 与前端 `dev-smart-assistant-frontend` 联调登录与流式对话  
 
 ### 已知注意点
 
-- 意图路由四个策略仍为占位；部分 AI / RAG 检索仍为占位实现；文档上传已完成切块与 Embedding 入库；知识库/文档删除会清理对应 Milvus 向量（Collection 不存在时跳过清理）  
+- `knowledge_query` 已接 RAG；`general` / `code` / `doc` 仍为占位；chat 接口尚未走意图图  
+- 文档上传已完成切块与 Embedding 入库；知识库/文档删除会清理对应 Milvus 向量（Collection 不存在时跳过清理）  
 - 扫描版 PDF（纯图片）可能解析出空文本，需后续 OCR 增强；空文本会跳过向量写入  
 - 启动健康检查与各模块 `/status` **不依赖** MySQL；带 `DbSession` 的接口在真正执行 SQL 前一般也不会立刻连库，但正式业务开发前请先配好 `.env` 中的 `DATABASE_URL`  
 - Python 本机若是 3.13，满足「3.12+」要求；团队若统一 3.12，可在虚拟环境中指定 3.12 解释器  
-- 若启动报 `ModuleNotFoundError`，请在已激活的 `.venv` 中执行 `pip install -r requirements.txt`。对话相关还依赖 `langchain-core`、`langchain-qwq`、`langgraph`、`openai`；文档切片依赖 `langchain-text-splitters`、`tiktoken`；文档解析依赖 `pypdf`、`python-docx`  
-- **Cursor 全局 MySQL MCP**：已在 `%USERPROFILE%\.cursor\mcp.json` 配置 `@kyruntime/mysql-mcp`，连接本机 `127.0.0.1:3306`（默认库 `dev_assistant`）。修改账号后需在 Cursor 的 **Settings → MCP** 里刷新/重启该服务；写操作默认关闭（只读查询更安全）  
-
+- 若启动报 `ModuleNotFoundError`，请在已激活的 `.venv` 中执行 `pip install -r requirements.txt`。对话相关还依赖 `langchain-core`、`langchain-qwq`、`langgraph`、`openai`、`dashscope`；文档切片依赖 `langchain-text-splitters`、`tiktoken`；文档解析依赖 `pypdf`、`python-docx`  
+- **Cursor 全局 MySQL MCP**：已在 `%USERPROFILE%\.cursor\mcp.json` 配置 `@kyruntime/mysql-mcp`，连接本机 `127.0.0.1:3306`（默认库 `dev_assistant`）。修改账号后需在 Cursor 的 **Settings → MCP** 里刷新/重启该服务；写操作默认关闭（只读查询更安全）
 
 ---
 

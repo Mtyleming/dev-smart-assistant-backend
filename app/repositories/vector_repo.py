@@ -56,13 +56,116 @@ class VectorRepository:
 
     async def search(
         self,
-        question: str,
-        team_id: str,
-        kb_ids: list[str],
-    ) -> list[dict]:
-        """按问题与知识库范围检索切块（占位，后续 RAG 接入）。"""
-        _ = (question, team_id, kb_ids)
-        return []
+        query_vector: list[float],
+        team_id: int,
+        kb_ids: list[int] | None = None,
+        *,
+        top_k: int = 5,
+    ) -> list[dict[str, Any]]:
+        """按查询向量与知识库范围检索切块，返回 Milvus hit 列表。
+
+        返回格式：[{"entity": {...}, "distance": float}, ...]
+        kb_ids 为空时检索该团队下全部知识库。
+        """
+        if not query_vector:
+            return []
+        try:
+            return await asyncio.to_thread(
+                self._search_sync,
+                query_vector,
+                int(team_id),
+                list(kb_ids or []),
+                int(top_k),
+            )
+        except AppException:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Milvus 检索失败 team_id=%s kb_ids=%s", team_id, kb_ids
+            )
+            _raise_milvus_error(
+                code=50304,
+                default_message="向量检索失败",
+                exc=exc,
+            )
+            return []  # pragma: no cover
+
+    def _search_sync(
+        self,
+        query_vector: list[float],
+        team_id: int,
+        kb_ids: list[int],
+        top_k: int,
+    ) -> list[dict[str, Any]]:
+        """同步向量检索（在线程池中执行）。"""
+        from pymilvus import MilvusClient
+
+        client = MilvusClient(uri=settings.milvus_uri)
+        collection = settings.milvus_collection
+        if not client.has_collection(collection_name=collection):
+            logger.warning("Milvus collection 不存在，检索返回空: %s", collection)
+            return []
+
+        self._ensure_loaded_sync(client, collection)
+
+        filter_parts = [f"team_id == {team_id}"]
+        if kb_ids:
+            ids = ", ".join(str(int(kid)) for kid in kb_ids)
+            filter_parts.append(f"knowledge_base_id in [{ids}]")
+        filter_expr = " and ".join(filter_parts)
+
+        output_fields = [
+            "chunk_id",
+            "document_id",
+            "chunk_index",
+            "content",
+            "knowledge_base_id",
+            "team_id",
+        ]
+        results = client.search(
+            collection_name=collection,
+            data=[query_vector],
+            limit=max(1, top_k),
+            filter=filter_expr,
+            output_fields=output_fields,
+        )
+        # MilvusClient.search 返回 List[List[hit]]
+        hits = results[0] if results else []
+        normalized: list[dict[str, Any]] = []
+        for hit in hits:
+            if isinstance(hit, dict):
+                entity = dict(hit.get("entity") or {})
+                distance = hit.get("distance")
+            else:
+                distance = getattr(hit, "distance", None)
+                raw_entity = getattr(hit, "entity", None)
+                if raw_entity is None:
+                    entity = {}
+                elif isinstance(raw_entity, dict):
+                    entity = dict(raw_entity)
+                else:
+                    entity = {
+                        field: (
+                            raw_entity.get(field)
+                            if hasattr(raw_entity, "get")
+                            else getattr(raw_entity, field, None)
+                        )
+                        for field in output_fields
+                    }
+            normalized.append(
+                {
+                    "entity": {
+                        "chunk_id": entity.get("chunk_id"),
+                        "document_id": entity.get("document_id"),
+                        "chunk_index": entity.get("chunk_index"),
+                        "content": entity.get("content") or "",
+                        "knowledge_base_id": entity.get("knowledge_base_id"),
+                        "team_id": entity.get("team_id"),
+                    },
+                    "distance": distance,
+                }
+            )
+        return normalized
 
     async def upsert_chunks(self, rows: list[dict[str, Any]]) -> None:
         """批量写入切块向量；自动确保 Collection 存在。

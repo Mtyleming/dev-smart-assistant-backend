@@ -20,11 +20,26 @@ ROLE_LABELS = {
     "system": "系统",
 }
 
+RAG_SYSTEM_PROMPT = (
+    "你是开发智能助手。请严格依据用户提供的知识库检索片段回答问题。"
+    "若片段不足以支撑结论，请明确说明不确定之处。"
+    "回答使用简洁中文，不要编造片段中不存在的事实。"
+)
+
+_NOT_FOUND_HINT = "知识库中未找到相关信息"
+
+GENERAL_FALLBACK_SYSTEM_PROMPT = (
+    "你是开发智能助手。当前知识库检索未找到足够相关的信息，"
+    "请基于通用知识尽量回答用户问题，并在回答开头明确告知："
+    "「知识库中未找到相关信息」。"
+)
+
 SUMMARY_SYSTEM_PROMPT = (
     "你是专业的对话摘要助手。请将用户提供的对话历史压缩为简洁的中文摘要，"
     "保留关键上下文、重要结论和未解决问题。"
     "摘要必须不超过200字，只输出摘要正文，不要添加标题或额外说明。"
 )
+
 
 _llm: ChatQwen | None = None
 _llm_config_key: tuple[str, str, str] | None = None
@@ -77,17 +92,76 @@ class LLMClient:
     def __init__(self) -> None:
         self._settings = get_settings()
 
-    async def generate(self, question: str, chunks: list[dict]) -> dict:
-        """
-        根据问题与检索切块生成回答。
+    async def generate(
+        self,
+        question: str,
+        chunks: list[dict],
+        *,
+        context: str | None = None,
+    ) -> dict:
+        """根据问题与检索切块生成回答。
 
         返回纯数据：{"text": str, "sources": list}
         """
-        _ = (question, chunks, self._settings.llm_api_key)
-        return {
-            "text": "（骨架占位）大模型尚未接入，请稍后配置 DASHSCOPE_API_KEY。",
-            "sources": [],
-        }
+        sources = [
+            {
+                "document_id": chunk.get("document_id"),
+                "chunk_index": chunk.get("chunk_index"),
+                "knowledge_base_id": chunk.get("knowledge_base_id"),
+                "score": chunk.get("score"),
+            }
+            for chunk in chunks
+        ]
+
+        if context is None:
+            parts: list[str] = []
+            for order, chunk in enumerate(chunks, start=1):
+                parts.append(
+                    f"[片段{order}|document_id={chunk.get('document_id')}"
+                    f"|chunk_index={chunk.get('chunk_index')}]\n"
+                    f"{str(chunk.get('content') or '').strip()}"
+                )
+            context = "\n\n".join(parts)
+
+        user_prompt = (
+            f"问题：{question}\n\n"
+            f"知识库检索片段：\n{context or '（无）'}\n\n"
+            "请基于以上片段作答。"
+        )
+
+        if not self._settings.llm_api_key:
+            logger.warning("未配置 DASHSCOPE_API_KEY，返回 RAG 占位回复")
+            return {
+                "text": f"（骨架占位）已检索到 {len(chunks)} 条相关片段，请配置 API Key 后生成回答。",
+                "sources": sources,
+            }
+
+        try:
+            text = await self.chat(
+                [{"role": "user", "content": user_prompt}],
+                system_prompt=RAG_SYSTEM_PROMPT,
+            )
+            return {"text": text, "sources": sources}
+        except Exception as exc:
+            logger.warning("RAG 生成失败：%s", exc)
+            raise
+
+    async def generate_general_fallback(self, question: str) -> str:
+        """低置信度降级：通用问答，并明确告知知识库未找到相关信息。"""
+        if not self._settings.llm_api_key:
+            return f"{_NOT_FOUND_HINT}。你可以换个问法，或检查知识库是否已上传相关文档。"
+
+        try:
+            text = await self.chat(
+                [{"role": "user", "content": question}],
+                system_prompt=GENERAL_FALLBACK_SYSTEM_PROMPT,
+            )
+            if _NOT_FOUND_HINT not in text:
+                return f"{_NOT_FOUND_HINT}。\n\n{text}"
+            return text
+        except Exception as exc:
+            logger.warning("低置信度降级问答失败：%s", exc)
+            return f"{_NOT_FOUND_HINT}。暂时无法生成通用回答，请稍后重试。"
 
     async def summarize_messages(self, messages: list[dict[str, Any]]) -> str:
         """将历史消息压缩为不超过 200 字的中文摘要。"""
@@ -230,52 +304,10 @@ class LLMClient:
             raise
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """批量文本向量化（百炼 text-embedding-v4，OpenAI 兼容接口）。
+        """批量文本向量化；委托 EmbeddingService（兼容旧调用）。"""
+        from app.services.ai.embedding_service import embedding_service
 
-        单次请求最多 embedding_batch_size 条（默认 10），自动分批合并。
-        未配置 API Key 或调用失败时抛出异常。
-        """
-        if not texts:
-            return []
-
-        api_key = self._settings.llm_api_key
-        if not api_key:
-            raise RuntimeError("未配置 DASHSCOPE_API_KEY，无法进行文本向量化")
-
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=self._settings.llm_api_base,
-        )
-        model = self._settings.embedding_model
-        dimensions = self._settings.embedding_dimensions
-        batch_size = max(1, int(self._settings.embedding_batch_size))
-
-        vectors: list[list[float]] = []
-        try:
-            for start in range(0, len(texts), batch_size):
-                batch = texts[start : start + batch_size]
-                response = await client.embeddings.create(
-                    model=model,
-                    input=batch,
-                    dimensions=dimensions,
-                    encoding_format="float",
-                )
-                # API 按 index 回传，排序后保证与输入顺序一致
-                ordered = sorted(response.data, key=lambda item: item.index)
-                vectors.extend([list(item.embedding) for item in ordered])
-        except Exception as exc:
-            logger.warning("文本向量化失败：%s", exc)
-            raise
-        finally:
-            await client.close()
-
-        if len(vectors) != len(texts):
-            raise RuntimeError(
-                f"向量数量与文本数量不一致：texts={len(texts)} vectors={len(vectors)}"
-            )
-        return vectors
+        return await embedding_service.embed(texts)
 
 
 llm_client = LLMClient()
