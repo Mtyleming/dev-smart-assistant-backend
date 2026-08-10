@@ -7,6 +7,7 @@ SELECT
     m.role,
     m.content,
     m.content_type,
+    m.sources,
     m.created_at
 FROM messages m
 INNER JOIN conversations c ON m.conversation_id = c.id

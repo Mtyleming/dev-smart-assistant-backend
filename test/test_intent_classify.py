@@ -75,13 +75,11 @@ async def run_one(
     *,
     expected: str | None = None,
     conversation_id: int = 999001,
-    history: list[dict] | None = None,
 ) -> dict:
     """跑一次意图识别并打印结果。"""
     result = await classify_intent(
         message=message,
         conversation_id=conversation_id,
-        history=history or [],
         redis_client=redis,
     )
     intent = result.get("intent")

@@ -24,6 +24,9 @@ RAG_SYSTEM_PROMPT = (
     "你是开发智能助手。请严格依据用户提供的知识库检索片段回答问题。"
     "若片段不足以支撑结论，请明确说明不确定之处。"
     "回答使用简洁中文，不要编造片段中不存在的事实。"
+    "当你的结论来自某个检索片段时，请在对应句子末尾标注引用编号，"
+    "格式为 [1]、[2]、[3]（与知识库上下文中的编号一致）；"
+    "不要引用不存在的编号。"
 )
 
 _NOT_FOUND_HINT = "知识库中未找到相关信息"
@@ -99,49 +102,36 @@ class LLMClient:
         *,
         context: str | None = None,
     ) -> dict:
-        """根据问题与检索切块生成回答。
+        """根据问题与检索切块生成回答（非流式；chat 主路径走流式组装）。
 
         返回纯数据：{"text": str, "sources": list}
         """
-        sources = [
-            {
-                "document_id": chunk.get("document_id"),
-                "chunk_index": chunk.get("chunk_index"),
-                "knowledge_base_id": chunk.get("knowledge_base_id"),
-                "score": chunk.get("score"),
-            }
-            for chunk in chunks
-        ]
+        from app.services.ai.citation_verifier import verify_and_filter_citations
+        from app.services.ai.rag_pipeline import (
+            build_rag_system_prompt,
+            format_numbered_context,
+        )
 
         if context is None:
-            parts: list[str] = []
-            for order, chunk in enumerate(chunks, start=1):
-                parts.append(
-                    f"[片段{order}|document_id={chunk.get('document_id')}"
-                    f"|chunk_index={chunk.get('chunk_index')}]\n"
-                    f"{str(chunk.get('content') or '').strip()}"
-                )
-            context = "\n\n".join(parts)
+            context = format_numbered_context(chunks)
 
-        user_prompt = (
-            f"问题：{question}\n\n"
-            f"知识库检索片段：\n{context or '（无）'}\n\n"
-            "请基于以上片段作答。"
-        )
+        user_prompt = question
+        system_prompt = build_rag_system_prompt(context)
 
         if not self._settings.llm_api_key:
             logger.warning("未配置 DASHSCOPE_API_KEY，返回 RAG 占位回复")
             return {
                 "text": f"（骨架占位）已检索到 {len(chunks)} 条相关片段，请配置 API Key 后生成回答。",
-                "sources": sources,
+                "sources": [],
             }
 
         try:
             text = await self.chat(
                 [{"role": "user", "content": user_prompt}],
-                system_prompt=RAG_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
             )
-            return {"text": text, "sources": sources}
+            answer, sources, _ = verify_and_filter_citations(text, chunks)
+            return {"text": answer, "sources": sources}
         except Exception as exc:
             logger.warning("RAG 生成失败：%s", exc)
             raise

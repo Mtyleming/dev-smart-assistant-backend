@@ -797,15 +797,17 @@ source scripts/create_document_chunks.sql
 
 ```json
 {
-  "content": "帮我写一个 FastAPI 登录接口",
+  "content": "项目里登录接口怎么写？",
   "content_type": "text",
-  "conversation_id": 1
+  "conversation_id": 1,
+  "knowledge_base_id": 3
 }
 ```
 
 - `content`：用户消息内容（必填）
 - `content_type`：`text` 或 `code`
 - `conversation_id`：对话 ID；**首次发起可不传**，系统会自动创建会话，标题取用户消息前 20 字
+- `knowledge_base_id`：可选；指定则只查该知识库，不传则查当前团队下全部知识库
 
 SSE 事件说明：
 
@@ -814,38 +816,29 @@ SSE 事件说明：
 | `conversation` | 新建会话时返回 `{"conversation_id": 1}` |
 | `user_msg` | 用户消息对象（含 id、role、content 等） |
 | `delta` | 助手回复增量 `{"content": "..."}` |
-| `assistant_msg` | 助手完整消息对象（落库后） |
-| `done` | 流结束，`data` 为 `null` |
+| `citation_verified` | （仅 RAG）流结束后若引用编号被清洗，返回校正后的全文与 sources |
+| `assistant_msg` | 助手完整消息对象（含 `content`、`sources`） |
+| `done` | 流结束，`data` 为 `{"sources": [...]}`；每项含 `ref`、`document_id`、`chunk_index`、`content`（切片正文）等 |
 | `error` | 错误信息 `{"code": 40900, "message": "..."}` |
-
-示例流：
-
-```
-event: user_msg
-data: {"id": 1, "role": "user", "content": "...", "content_type": "text", "created_at": "..."}
-
-event: delta
-data: {"content": "可以"}
-
-event: delta
-data: {"content": "使用 JWT"}
-
-event: assistant_msg
-data: {"id": 2, "role": "assistant", "content": "可以使用 JWT...", ...}
-
-event: done
-data: null
-```
 
 处理流程：
 
-1. 获取分布式锁 `conv:lock:{conversation_id}`（SETNX，TTL 30s），失败返回 `409`，message 为「消息处理中」
-2. 保存用户消息到数据库（`role=user`）
-3. 将用户消息追加到 Redis `conv:msg:{conversation_id}`，刷新 TTL 15 分钟
-4. 获取上下文；超过 20 条时调用 LLM 摘要，写入 system 提示词，并保留最近 10 条完整消息
-5. 保存助手回复到数据库与 Redis
-6. 更新会话 `updated_at`，用于列表排序
-7. 释放分布式锁
+1. 获取分布式锁；保存用户消息到 MySQL / Redis  
+2. **意图识别**：`knowledge_query` 走 RAG，其它意图走通用对话  
+3. RAG 路径：检索 Top5 → 重排 Top3 → 组装提示词（系统提示 + `[1][2][3]` 上下文 + 最近 3 轮历史 + 当前问题）→ 流式生成  
+4. 流结束后校验回答中的 `[n]` 是否对应真实切块；无效编号删除；`sources` 只保留真实引用，并带上切片正文 `content`  
+5. 助手完整 `content` 与 `sources` 写入 `messages` 表并回写 Redis；`done` 事件同步返回 `sources`  
+6. 释放分布式锁  
+
+若数据库已有 `messages` 表但没有 `sources` 列，请执行：
+
+```bash
+# MySQL
+source scripts/add_messages_sources.sql
+# 或
+$env:PYTHONPATH="."
+python scripts/migrate_messages_sources.py
+```
 
 ---
 
@@ -921,7 +914,7 @@ summary = await summarize_messages(messages)
 
 ### 意图识别与路由（当前）
 
-用户消息经 `classify_intent` 分为四类，再由 LangGraph 分发到对应节点；节点内用策略模式执行：
+用户当前消息经 `classify_intent`（**只看当前输入，不看历史**）分为四类，再由 LangGraph 分发到对应节点；节点内用策略模式执行：
 
 | 意图 | LangGraph 节点 | 策略类 | 说明 |
 |------|----------------|--------|------|
@@ -934,7 +927,7 @@ summary = await summarize_messages(messages)
 - 意图置信度 `< 0.7` 或解析失败时，回退为 `general_qa`  
 - 识别结果缓存 Redis：`intent:{conversation_id}:{msg_hash}`，TTL 300 秒  
 - `IntentState` 可传 `team_id`、`kb_ids`（空列表 = 查团队下全部知识库）  
-- **注意**：`POST /api/v1/message/chat` 目前仍直接走通用对话，**尚未**接入意图识别 / RAG；调用 RAG 需通过 `intent_graph` 或直接 `KnowledgeQueryRouteStrategy.run(..., team_id=...)`
+- **chat 已接入**：`POST /api/v1/messages/chat` 会先意图识别；`knowledge_query` 走 RAG（含引用校验与 `sources` 落库），其它意图走通用对话  
 
 ### RAG 知识库查询流程
 
@@ -945,17 +938,20 @@ summary = await summarize_messages(messages)
    - **高**（≥ 0.8，且 Top-2/Top-3 均 ≥ 0.5）：正常 RAG 回答  
    - **中**（0.5～0.8，或高分但不一致）：回答并提示「建议进一步确认」  
    - **低**（&lt; 0.5 或无结果）：放弃检索，降级通用问答，并告知「知识库中未找到相关信息」  
-5. 上下文按相关性拼接，带来源元数据（`document_id`、`chunk_index`），总 Token ≤ 4000  
+5. 提示词结构：系统提示（RAG）+ 编号上下文 `[1][2][3]`（含切块内容与来源文档 ID）+ 最近 3 轮对话历史 + 当前用户问题  
+6. 流式结束后校验引用编号；助手 `content` 与真实 `sources` 写入 `messages` 表  
 
 相关环境变量：
 
 ```env
 EMBEDDING_MODEL=text-embedding-v4
 EMBEDDING_DIMENSIONS=1024
-RERANK_MODEL=gte-rerank
+RERANK_MODEL=gte-rerank-v2
 MILVUS_URI=http://127.0.0.1:19530
 MILVUS_COLLECTION=document_chunks
 ```
+
+> 若日志出现重排 `403 Access denied`：到[百炼模型广场](https://bailian.console.aliyun.com/)开通 `gte-rerank-v2`（或把 `.env` 的 `RERANK_MODEL` 改成已开通的文本排序模型）。未开通时系统会自动按向量检索顺序降级，对话仍可用。
 
 用法示例：
 
@@ -965,7 +961,7 @@ from app.services.ai.intent_router import intent_graph
 from app.services.route import get_route_strategy
 
 # 1) 识别意图
-result = await classify_intent(message, conversation_id, history, redis)
+result = await classify_intent(message, conversation_id, redis)
 # {"intent": "knowledge_query", "confidence": 0.92}
 
 # 2) LangGraph 分发（知识库查询需传 team_id；kb_ids 可选）
@@ -1010,15 +1006,16 @@ python test/test_intent_classify.py --ask
 ### 建议下一步
 
 1. 配好本机 MySQL，用 Alembic 做正式建表迁移  
-2. 将 `chat_service` 接入意图识别与 RAG（请求侧可选 `knowledge_base_id`）  
-3. 补全 `general` / `code` / `doc` 三个策略的真实 run 逻辑  
-4. 与前端 `dev-smart-assistant-frontend` 联调登录与流式对话  
+2. 补全 `general` / `code` / `doc` 三个策略的真实 run 逻辑  
+3. 与前端联调：消费 `sources`、`citation_verified` 事件展示引用  
 
 ### 已知注意点
 
-- `knowledge_query` 已接 RAG；`general` / `code` / `doc` 仍为占位；chat 接口尚未走意图图  
+- `knowledge_query` 已接 RAG，且 **chat 接口已按意图分流**；`general` / `code` / `doc` 策略仍为占位  
 - 文档上传已完成切块与 Embedding 入库；知识库/文档删除会清理对应 Milvus 向量（Collection 不存在时跳过清理）  
+- 若 chat 报未知列 `sources`，请先执行 `scripts/add_messages_sources.sql` 或 `scripts/migrate_messages_sources.py`  
 - 扫描版 PDF（纯图片）可能解析出空文本，需后续 OCR 增强；空文本会跳过向量写入  
+- **文档上传返回 503「文档向量化失败」**：多半不是 Milvus 坏了，而是调用百炼 Embedding 时走了本机代理（如 `127.0.0.1:7897`）却连不上。`embedding_service` 已对百炼请求设置 `trust_env=False`（直连、忽略系统代理）。若仍失败：① 确认能访问 `dashscope.aliyuncs.com`；② 检查 `.env` 的 `DASHSCOPE_API_KEY`；③ 失败文档需重新上传（当前无单独「重新向量化」接口）  
 - 启动健康检查与各模块 `/status` **不依赖** MySQL；带 `DbSession` 的接口在真正执行 SQL 前一般也不会立刻连库，但正式业务开发前请先配好 `.env` 中的 `DATABASE_URL`  
 - Python 本机若是 3.13，满足「3.12+」要求；团队若统一 3.12，可在虚拟环境中指定 3.12 解释器  
 - 若启动报 `ModuleNotFoundError`，请在已激活的 `.venv` 中执行 `pip install -r requirements.txt`。对话相关还依赖 `langchain-core`、`langchain-qwq`、`langgraph`、`openai`、`dashscope`；文档切片依赖 `langchain-text-splitters`、`tiktoken`；文档解析依赖 `pypdf`、`python-docx`  

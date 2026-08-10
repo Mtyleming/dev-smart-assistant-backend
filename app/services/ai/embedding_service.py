@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import logging
 
+import httpx
+from openai import AsyncOpenAI
+
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# 国内百炼可直连；忽略系统/环境代理，避免本机 Clash 未开时向量化失败
+_HTTP_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 
 
 class EmbeddingService:
@@ -28,11 +34,12 @@ class EmbeddingService:
         if not api_key:
             raise RuntimeError("未配置 DASHSCOPE_API_KEY，无法进行文本向量化")
 
-        from openai import AsyncOpenAI
-
+        # trust_env=False：不读 HTTP_PROXY / 系统代理（常见为 127.0.0.1:7897）
+        http_client = httpx.AsyncClient(trust_env=False, timeout=_HTTP_TIMEOUT)
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=self._settings.llm_api_base,
+            http_client=http_client,
         )
         model = self._settings.embedding_model
         dimensions = self._settings.embedding_dimensions

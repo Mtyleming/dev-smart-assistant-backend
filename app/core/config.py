@@ -89,9 +89,9 @@ class Settings(BaseSettings):
         default="document_chunks",
         validation_alias=AliasChoices("MILVUS_COLLECTION"),
     )
-    # 文本重排模型（百炼 gte-rerank）
+    # 文本重排模型（百炼文本排序；gte-rerank 旧名常 403，默认用 v2）
     rerank_model: str = Field(
-        default="gte-rerank",
+        default="gte-rerank-v2",
         validation_alias=AliasChoices("RERANK_MODEL"),
     )
     # 知识库文档本地存储目录

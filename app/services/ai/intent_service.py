@@ -22,13 +22,14 @@ VALID_INTENTS = (
 )
 
 INTENT_SYSTEM_PROMPT = (
-    "你是一个意图分类器。根据用户消息和对话历史，将意图分类为以下四类之一：\n"
+    "你是一个意图分类器。仅根据用户当前这条消息，将意图分类为以下四类之一：\n"
     "1. knowledge_query：查询内部知识库中的技术文档、框架用法、编码规范等\n"
     "2. general_qa：通用技术问答，不依赖内部知识库\n"
     "3. code_request：请求解读、生成或审查代码\n"
     "4. doc_generation：请求生成技术文档\n\n"
     "注意：写代码、改代码、审查代码属于 code_request；"
-    "生成 README/接口文档/设计文档属于 doc_generation。\n"
+    "生成 README/接口文档/设计文档属于 doc_generation。"
+    "不要参考对话历史，只看当前消息本身。\n"
     '只输出一行 JSON，不要 Markdown，不要解释：{"intent":"类型","confidence":0.0}'
 )
 
@@ -111,10 +112,9 @@ def _normalize_result(raw: dict) -> dict:
 async def classify_intent(
     message: str,
     conversation_id: int,
-    history: list[dict],
     redis_client,
 ) -> dict:
-    """识别用户消息意图，结果缓存到 Redis（TTL 300 秒）。
+    """仅根据用户当前输入识别意图，结果缓存到 Redis（TTL 300 秒）。
 
     Returns:
         {"intent": str, "confidence": float}
@@ -135,11 +135,7 @@ async def classify_intent(
         await redis_client.set(cache_key, json.dumps(result), ex=300)
         return result
 
-    history_text = "\n".join(
-        f"{m.get('role', 'user')}: {str(m.get('content', ''))[:200]}"
-        for m in history[-6:]
-    )
-    human_content = f"对话历史：\n{history_text}\n\n当前消息：{message}"
+    human_content = f"当前消息：{message}"
 
     try:
         response = await _get_intent_llm().ainvoke(

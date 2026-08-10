@@ -14,6 +14,23 @@ from app.repositories.sql import (
 )
 
 
+def _normalize_sources(raw: Any) -> list[dict[str, Any]] | None:
+    """将 DB / ORM 中的 sources 规范为 list 或 None。"""
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        import json
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, list) else None
+    return None
+
+
 def _row_to_message_item(row: Mapping[str, Any]) -> dict[str, Any]:
     """将查询行映射为消息列表项。"""
     return {
@@ -21,6 +38,7 @@ def _row_to_message_item(row: Mapping[str, Any]) -> dict[str, Any]:
         "role": row["role"],
         "content": row["content"],
         "content_type": row.get("content_type") or MessageContentType.text.value,
+        "sources": _normalize_sources(row.get("sources")),
         "created_at": row["created_at"],
     }
 
@@ -32,6 +50,7 @@ def _message_to_dict(message: Message) -> dict[str, Any]:
         "role": message.role.value,
         "content": message.content,
         "content_type": message.content_type.value,
+        "sources": _normalize_sources(message.sources),
         "created_at": message.created_at,
     }
 
@@ -46,6 +65,8 @@ class MessageRepository:
         role: str,
         content: str,
         content_type: str = MessageContentType.text.value,
+        *,
+        sources: list[dict[str, Any]] | None = None,
     ) -> Message:
         """保存一条消息。"""
         message = Message(
@@ -53,6 +74,7 @@ class MessageRepository:
             role=MessageRole(role),
             content=content,
             content_type=MessageContentType(content_type),
+            sources=sources,
         )
         db.add(message)
         await db.flush()

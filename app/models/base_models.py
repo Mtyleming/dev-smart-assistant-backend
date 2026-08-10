@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -303,6 +304,7 @@ class Message(Base):
         nullable=False,
         server_default=MessageContentType.text.value,
     )
+    sources: Mapped[list | dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()
     )

@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,6 +35,7 @@ class MessageListItem(BaseModel):
     role: str
     content: str
     content_type: str = "text"
+    sources: list[dict[str, Any]] | None = None
     created_at: datetime
 
 
@@ -68,6 +70,12 @@ class ChatRequest(BaseModel):
         alias="conversation_id",
         description="对话 ID，首次发起可不传",
     )
+    knowledge_base_id: int | None = Field(
+        default=None,
+        alias="knowledge_base_id",
+        ge=1,
+        description="可选知识库 ID；不传则检索当前团队全部知识库",
+    )
 
 
 class ChatMessageItem(BaseModel):
@@ -77,6 +85,7 @@ class ChatMessageItem(BaseModel):
     role: str
     content: str
     content_type: str
+    sources: list[dict[str, Any]] | None = None
     created_at: datetime
 
 
