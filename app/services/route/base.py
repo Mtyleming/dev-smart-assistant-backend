@@ -24,6 +24,7 @@ class IntentRouteStrategy(ABC):
         *,
         team_id: int | None = None,
         kb_ids: list[int] | None = None,
+        content_type: str | None = None,
     ) -> dict:
         """执行该意图对应的业务逻辑。
 
@@ -32,6 +33,7 @@ class IntentRouteStrategy(ABC):
             conversation_id: 对话 ID。
             team_id: 团队 ID（知识库查询等场景需要）。
             kb_ids: 可选知识库 ID 列表；空表示团队下全部知识库。
+            content_type: 消息内容类型（如 text / code），代码辅助场景使用。
 
         Returns:
             纯数据结果字典，至少包含 answer / intent / status 等字段。

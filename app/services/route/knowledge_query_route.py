@@ -23,8 +23,10 @@ class KnowledgeQueryRouteStrategy(IntentRouteStrategy):
         *,
         team_id: int | None = None,
         kb_ids: list[int] | None = None,
+        content_type: str | None = None,
     ) -> dict:
         """执行知识库 RAG 查询。"""
+        _ = content_type
         if team_id is None:
             logger.warning(
                 "knowledge_query 缺少 team_id conversation_id=%s",

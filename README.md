@@ -94,13 +94,15 @@ app/
 │   ├── reranker_service.py  # 百炼 gte-rerank 文本重排
 │   ├── chat_service.py
 │   ├── code_assist_service.py
+│   ├── code_parser.py           # 抽代码 / 语言检测 / 轻量结构化
+│   ├── code_analysis_service.py # 代码解读编排（调 LLM）
 │   ├── doc_generator_service.py
 │   ├── route/               # 意图路由策略（策略模式）
 │   │   ├── base.py          # 策略接口
 │   │   ├── factory.py       # 按 intent 选择策略
 │   │   ├── knowledge_query_route.py  # 知识库查询 → rag（已接 RAG）
 │   │   ├── general_qa_route.py       # 通用问答 → general
-│   │   ├── code_request_route.py     # 代码辅助 → code
+│   │   ├── code_request_route.py     # 代码辅助 → code（解读已接入）
 │   │   └── doc_generation_route.py   # 文档生成 → doc
 │   └── ai/                  # AI 只出现在这里
 │       ├── llm_client.py    # 百炼大模型对话 / RAG 生成
@@ -910,7 +912,7 @@ summary = await summarize_messages(messages)
 - [x] Embedding 工具类抽离（`embedding_service`，上传与 RAG 查询共用 `text-embedding-v4`）  
 - [x] RAG 检索链路（向量 Top5 → gte-rerank Top3 → 置信度 → 上下文组装 → 生成）  
 - [x] 意图识别（`intent_service`）+ LangGraph 四节点路由（`intent_router`）  
-- [x] 意图路由策略（`knowledge_query` 已接 RAG；其余三类仍为占位）  
+- [x] 意图路由策略（`knowledge_query` 已接 RAG；`code_request` 已接代码解读；其余仍为占位）  
 
 ### 意图识别与路由（当前）
 
@@ -920,14 +922,30 @@ summary = await summarize_messages(messages)
 |------|----------------|--------|------|
 | `knowledge_query` | `rag` | `KnowledgeQueryRouteStrategy` | 已接入 RAG 知识库查询 |
 | `general_qa` | `general` | `GeneralQaRouteStrategy` | 通用技术问答（占位） |
-| `code_request` | `code` | `CodeRequestRouteStrategy` | 代码解读/生成/审查（占位） |
+| `code_request` | `code` | `CodeRequestRouteStrategy` | **代码解读已接入**；生成仍占位 |
 | `doc_generation` | `doc` | `DocGenerationRouteStrategy` | 生成技术文档（占位） |
 
 - API Key：使用 `.env` 的 `DASHSCOPE_API_KEY`（对应 `settings.llm_api_key`）  
 - 意图置信度 `< 0.7` 或解析失败时，回退为 `general_qa`  
 - 识别结果缓存 Redis：`intent:{conversation_id}:{msg_hash}`，TTL 300 秒  
-- `IntentState` 可传 `team_id`、`kb_ids`（空列表 = 查团队下全部知识库）  
-- **chat 已接入**：`POST /api/v1/messages/chat` 会先意图识别；`knowledge_query` 走 RAG（含引用校验与 `sources` 落库），其它意图走通用对话  
+- `IntentState` 可传 `team_id`、`kb_ids`（空列表 = 查团队下全部知识库）、`content_type`（代码辅助用）  
+- **chat 已接入**：`POST /api/v1/messages/chat` 会先意图识别；`knowledge_query` 走 RAG（含引用校验与 `sources` 落库），`code_request` 走代码解读，其它意图走通用对话  
+
+### 代码辅助 · 解读（当前）
+
+当意图为 `code_request` 时：
+
+1. **子能力判断**：消息含「帮我写 / 生成 / 实现一个」等且抽不出代码 → 返回「代码生成功能开发中」  
+2. **解读路径**：提取 Markdown 代码块（或 `content_type=code` 整段）→ 检测语言（围栏标记 → Pygments `guess_lexer` → 正则特征）→ 轻量结构化（函数/类名）→ 调用大模型按系统提示输出 JSON 分析 → 格式化为 Markdown 回复  
+3. SSE 仍发 `delta`（整段结果按块切分推送）与 `final`  
+
+限制：
+
+- 单次代码不超过 **2000 行**  
+- 团队编码规范向量检索**尚未接入**（提示词中为「未检测到团队编码规范」）  
+- **代码生成**尚未实现  
+
+相关文件：`app/services/code_parser.py`、`app/services/code_analysis_service.py`、`app/services/route/code_request_route.py`。
 
 ### RAG 知识库查询流程
 
@@ -1006,12 +1024,14 @@ python test/test_intent_classify.py --ask
 ### 建议下一步
 
 1. 配好本机 MySQL，用 Alembic 做正式建表迁移  
-2. 补全 `general` / `code` / `doc` 三个策略的真实 run 逻辑  
-3. 与前端联调：消费 `sources`、`citation_verified` 事件展示引用  
+2. 补全 `general` / `doc` 策略，以及代码**生成**链路  
+3. 代码解读接入团队编码规范检索（知识库）  
+4. 与前端联调：消费 `sources`、`citation_verified` 事件展示引用  
 
 ### 已知注意点
 
-- `knowledge_query` 已接 RAG，且 **chat 接口已按意图分流**；`general` / `code` / `doc` 策略仍为占位  
+- `knowledge_query` 已接 RAG；`code_request` **解读已接入**（生成仍占位）；`general` / `doc` 策略仍为占位  
+- chat 对 `code_request` 会调用 `CodeRequestRouteStrategy`；粘贴代码请用 Markdown 围栏或 `content_type: "code"`  
 - 文档上传已完成切块与 Embedding 入库；知识库/文档删除会清理对应 Milvus 向量（Collection 不存在时跳过清理）  
 - 若 chat 报未知列 `sources`，请先执行 `scripts/add_messages_sources.sql` 或 `scripts/migrate_messages_sources.py`  
 - 扫描版 PDF（纯图片）可能解析出空文本，需后续 OCR 增强；空文本会跳过向量写入  

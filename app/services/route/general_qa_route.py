@@ -22,9 +22,10 @@ class GeneralQaRouteStrategy(IntentRouteStrategy):
         *,
         team_id: int | None = None,
         kb_ids: list[int] | None = None,
+        content_type: str | None = None,
     ) -> dict:
         """占位：后续接入通用大模型问答。"""
-        _ = (team_id, kb_ids)
+        _ = (team_id, kb_ids, content_type)
         logger.info(
             "general_qa 占位执行 conversation_id=%s message_len=%s",
             conversation_id,

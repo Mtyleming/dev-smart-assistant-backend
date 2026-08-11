@@ -26,6 +26,19 @@ from app.services.ai.rag_pipeline import (
     rag_pipeline,
     take_recent_turns,
 )
+from app.services.route import get_route_strategy
+
+# 代码解读非流式结果按块模拟 SSE delta，避免一次塞整篇 Markdown
+_CODE_ANSWER_CHUNK_SIZE = 80
+
+
+def _chunk_text(text: str, size: int = _CODE_ANSWER_CHUNK_SIZE) -> list[str]:
+    """将文本按固定长度切分，供 SSE 逐块推送。"""
+    if not text:
+        return []
+    if size <= 0:
+        return [text]
+    return [text[i : i + size] for i in range(0, len(text), size)]
 
 
 def _build_conversation_title(content: str) -> str:
@@ -159,6 +172,7 @@ class ChatService:
         question: str,
         context: list[dict[str, Any]],
         kb_ids: list[int],
+        content_type: str | None = None,
     ) -> tuple[str, list[dict[str, Any]] | None, str]:
         """按意图生成助手回复。
 
@@ -200,7 +214,22 @@ class ChatService:
                 answer = f"{answer}\n\n{_CONFIRM_HINT}"
             return answer, sources, intent
 
-        # 非知识库意图：沿用通用对话（含长上下文摘要）
+        if intent == "code_request":
+            strategy = get_route_strategy("code_request")
+            result = await strategy.run(
+                question,
+                conversation_id,
+                team_id=team_id,
+                kb_ids=kb_ids,
+                content_type=content_type,
+            )
+            answer = str(result.get("answer") or "").strip()
+            sources = result.get("sources")
+            if sources is None:
+                sources = []
+            return answer, sources, intent
+
+        # 其它意图：沿用通用对话（含长上下文摘要）
         system_prompt, llm_context = await self._build_system_prompt(context)
         answer = await llm_client.chat(llm_context, system_prompt=system_prompt)
         return answer, None, intent
@@ -214,6 +243,7 @@ class ChatService:
         question: str,
         context: list[dict[str, Any]],
         kb_ids: list[int],
+        content_type: str | None = None,
     ) -> AsyncIterator[tuple[str, Any]]:
         """流式生成助手回复，产出 delta / 最终 (final, text, sources, intent)。"""
         intent_result = await classify_intent(
@@ -278,6 +308,28 @@ class ChatService:
                     "content": answer,
                     "sources": sources,
                 }
+            yield "final", {
+                "content": answer,
+                "sources": sources,
+                "intent": intent,
+            }
+            return
+
+        if intent == "code_request":
+            strategy = get_route_strategy("code_request")
+            result = await strategy.run(
+                question,
+                conversation_id,
+                team_id=team_id,
+                kb_ids=kb_ids,
+                content_type=content_type,
+            )
+            answer = str(result.get("answer") or "").strip()
+            sources = result.get("sources")
+            if sources is None:
+                sources = []
+            for piece in _chunk_text(answer):
+                yield "delta", {"content": piece}
             yield "final", {
                 "content": answer,
                 "sources": sources,
@@ -359,6 +411,7 @@ class ChatService:
                 question=payload.content,
                 context=context,
                 kb_ids=kb_ids,
+                content_type=payload.content_type.value,
             )
 
             assistant_message = await message_repo.save_message(
@@ -460,6 +513,7 @@ class ChatService:
                 question=payload.content,
                 context=context,
                 kb_ids=kb_ids,
+                content_type=payload.content_type.value,
             ):
                 if event_name == "delta":
                     yield "delta", event_data

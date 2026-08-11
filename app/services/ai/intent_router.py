@@ -19,6 +19,7 @@ class IntentState(TypedDict):
     result: dict
     team_id: NotRequired[int | None]
     kb_ids: NotRequired[list[int]]
+    content_type: NotRequired[str | None]
 
 
 def route_by_intent(
@@ -36,6 +37,7 @@ async def _run_strategy_node(state: IntentState, intent: str) -> dict:
         state["conversation_id"],
         team_id=state.get("team_id"),
         kb_ids=state.get("kb_ids") or [],
+        content_type=state.get("content_type"),
     )
     return {"result": result}
 
