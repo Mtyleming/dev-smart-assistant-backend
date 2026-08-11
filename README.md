@@ -922,7 +922,7 @@ summary = await summarize_messages(messages)
 |------|----------------|--------|------|
 | `knowledge_query` | `rag` | `KnowledgeQueryRouteStrategy` | 已接入 RAG 知识库查询 |
 | `general_qa` | `general` | `GeneralQaRouteStrategy` | 通用技术问答（占位） |
-| `code_request` | `code` | `CodeRequestRouteStrategy` | **代码解读已接入**；生成仍占位 |
+| `code_request` | `code` | `CodeRequestRouteStrategy` | **代码解读已接入**（含规范检索）；生成仍占位 |
 | `doc_generation` | `doc` | `DocGenerationRouteStrategy` | 生成技术文档（占位） |
 
 - API Key：使用 `.env` 的 `DASHSCOPE_API_KEY`（对应 `settings.llm_api_key`）  
@@ -936,13 +936,14 @@ summary = await summarize_messages(messages)
 当意图为 `code_request` 时：
 
 1. **子能力判断**：消息含「帮我写 / 生成 / 实现一个」等且抽不出代码 → 返回「代码生成功能开发中」  
-2. **解读路径**：提取 Markdown 代码块（或 `content_type=code` 整段）→ 检测语言（围栏标记 → Pygments `guess_lexer` → 正则特征）→ 轻量结构化（函数/类名）→ 调用大模型按系统提示输出 JSON 分析 → 格式化为 Markdown 回复  
-3. SSE 仍发 `delta`（整段结果按块切分推送）与 `final`  
+2. **解读路径**：提取代码 → 检测语言 → 轻量结构化 → **检索团队知识库编码规范并注入提示词** → 大模型 JSON 分析 → 格式化为 Markdown  
+3. 规范命中时：`sources` 返回规范切片（含正文，`kind=coding_spec`）；回复中会提示「已对照团队知识库中的编码规范」  
+4. SSE 仍发 `delta`（整段结果按块切分推送）与 `final`  
 
 限制：
 
 - 单次代码不超过 **2000 行**  
-- 团队编码规范向量检索**尚未接入**（提示词中为「未检测到团队编码规范」）  
+- 规范检索沿用 RAG 置信度门控：低置信度视为未命中，提示词写「未检测到团队编码规范」  
 - **代码生成**尚未实现  
 
 相关文件：`app/services/code_parser.py`、`app/services/code_analysis_service.py`、`app/services/route/code_request_route.py`。
@@ -1030,7 +1031,7 @@ python test/test_intent_classify.py --ask
 
 ### 已知注意点
 
-- `knowledge_query` 已接 RAG；`code_request` **解读已接入**（生成仍占位）；`general` / `doc` 策略仍为占位  
+- `knowledge_query` 已接 RAG；`code_request` **解读已接入**（含团队编码规范检索注入；生成仍占位）；`general` / `doc` 策略仍为占位  
 - chat 对 `code_request` 会调用 `CodeRequestRouteStrategy`；粘贴代码请用 Markdown 围栏或 `content_type: "code"`  
 - 文档上传已完成切块与 Embedding 入库；知识库/文档删除会清理对应 Milvus 向量（Collection 不存在时跳过清理）  
 - 若 chat 报未知列 `sources`，请先执行 `scripts/add_messages_sources.sql` 或 `scripts/migrate_messages_sources.py`  

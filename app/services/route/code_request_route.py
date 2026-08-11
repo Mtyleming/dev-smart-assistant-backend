@@ -53,8 +53,6 @@ class CodeRequestRouteStrategy(IntentRouteStrategy):
         content_type: str | None = None,
     ) -> dict:
         """代码解读；生成类请求本期返回开发中提示。"""
-        _ = (team_id, kb_ids)
-
         code, fence_lang = self._parser.extract_code(
             message, content_type=content_type
         )
@@ -74,8 +72,11 @@ class CodeRequestRouteStrategy(IntentRouteStrategy):
             }
 
         logger.info(
-            "code_request 解读执行 conversation_id=%s content_type=%s code_len=%s",
+            "code_request 解读执行 conversation_id=%s team_id=%s kb_ids=%s "
+            "content_type=%s code_len=%s",
             conversation_id,
+            team_id,
+            kb_ids,
             content_type,
             len(code),
         )
@@ -85,15 +86,18 @@ class CodeRequestRouteStrategy(IntentRouteStrategy):
                 content_type=content_type,
                 code=code or None,
                 fence_lang=fence_lang,
+                team_id=team_id,
+                kb_ids=kb_ids,
             )
             answer = code_analysis_service.format_answer(result)
             return {
                 "intent": self.intent,
                 "status": "ok",
                 "answer": answer,
-                "sources": [],
+                "sources": result.get("sources") or [],
                 "language": result.get("language"),
                 "structure": result.get("structure"),
+                "spec_injected": bool(result.get("spec_injected")),
             }
         except ValueError as exc:
             logger.info(

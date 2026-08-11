@@ -1,4 +1,4 @@
-"""代码分析服务：语言检测、结构化、调用大模型深度解读。"""
+"""代码分析服务：语言检测、结构化、检索团队编码规范、调用大模型深度解读。"""
 
 from __future__ import annotations
 
@@ -6,14 +6,18 @@ import logging
 from typing import Any
 
 from app.services.ai.llm_client import llm_client
+from app.services.ai.rag_pipeline import rag_pipeline
 from app.services.code_parser import CodeParser
 
 logger = logging.getLogger(__name__)
 
 MAX_CODE_LINES = 2000
+# 规范注入提示词时的大致长度上限（字符），避免挤占代码上下文
+MAX_SPEC_CHARS = 6000
 
 CODE_ANALYSIS_SYSTEM_PROMPT = (
     "你是一位资深代码审查专家。请对以下代码进行深度分析。"
+    "若提供了「团队编码规范」，审查时必须对照规范指出不符合项，并给出符合规范的改法。"
     "只输出 JSON，不要 Markdown 标题或其它解释文字。"
 )
 
@@ -32,11 +36,114 @@ HUMAN_PROMPT_TEMPLATE = (
 )
 
 
+def _build_spec_query(language: str) -> str:
+    """构造用于检索团队编码规范的查询语句。"""
+    lang = (language or "").strip() or "通用"
+    return (
+        f"{lang} 团队编码规范 命名规范 注释规范 Git 规范 代码风格 "
+        f"coding standards style guide"
+    )
+
+
+def _chunks_to_spec_text(chunks: list[dict[str, Any]]) -> str:
+    """将检索切块拼成规范正文，超长则截断。"""
+    parts: list[str] = []
+    total = 0
+    for order, chunk in enumerate(chunks, start=1):
+        content = str(chunk.get("content") or "").strip()
+        if not content:
+            continue
+        document_id = chunk.get("document_id")
+        block = f"[规范片段{order}|document_id={document_id}]\n{content}"
+        if total + len(block) > MAX_SPEC_CHARS:
+            remain = MAX_SPEC_CHARS - total
+            if remain > 100:
+                parts.append(block[:remain] + "…")
+            break
+        parts.append(block)
+        total += len(block) + 2
+    return "\n\n".join(parts).strip()
+
+
+def _chunks_to_sources(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """规范切块转为可落库 / 返回的 sources。"""
+    sources: list[dict[str, Any]] = []
+    for order, chunk in enumerate(chunks, start=1):
+        sources.append(
+            {
+                "ref": order,
+                "document_id": chunk.get("document_id"),
+                "chunk_index": chunk.get("chunk_index"),
+                "knowledge_base_id": chunk.get("knowledge_base_id"),
+                "score": chunk.get("score"),
+                "chunk_id": chunk.get("chunk_id"),
+                "content": str(chunk.get("content") or ""),
+                "kind": "coding_spec",
+            }
+        )
+    return sources
+
+
 class CodeAnalysisService:
-    """粘贴代码 → 解析 → 模型分析 → 结构化结果。"""
+    """粘贴代码 → 解析 → 检索规范 → 模型分析 → 结构化结果。"""
 
     def __init__(self, parser: CodeParser | None = None) -> None:
         self.parser = parser or CodeParser()
+
+    async def fetch_coding_spec(
+        self,
+        *,
+        team_id: int | None,
+        kb_ids: list[int] | None,
+        language: str,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """从团队知识库检索编码规范。
+
+        Returns:
+            (spec_text, sources)。未命中或无 team_id 时返回占位文案与空 sources。
+        """
+        if team_id is None:
+            return SPEC_PLACEHOLDER, []
+
+        query = _build_spec_query(language)
+        try:
+            retrieved = await rag_pipeline.retrieve(
+                query,
+                team_id=int(team_id),
+                kb_ids=list(kb_ids or []),
+            )
+        except Exception as exc:
+            logger.warning(
+                "检索团队编码规范失败 team_id=%s language=%s: %s",
+                team_id,
+                language,
+                exc,
+            )
+            return SPEC_PLACEHOLDER, []
+
+        if not retrieved.get("use_retrieval"):
+            logger.info(
+                "未命中团队编码规范 team_id=%s language=%s confidence=%s",
+                team_id,
+                language,
+                retrieved.get("confidence"),
+            )
+            return SPEC_PLACEHOLDER, []
+
+        chunks = list(retrieved.get("chunks") or [])
+        spec_text = _chunks_to_spec_text(chunks)
+        if not spec_text:
+            return SPEC_PLACEHOLDER, []
+
+        sources = _chunks_to_sources(chunks)
+        logger.info(
+            "已注入团队编码规范 team_id=%s language=%s chunks=%s chars=%s",
+            team_id,
+            language,
+            len(chunks),
+            len(spec_text),
+        )
+        return spec_text, sources
 
     async def analyze(
         self,
@@ -45,6 +152,8 @@ class CodeAnalysisService:
         content_type: str | None = None,
         code: str | None = None,
         fence_lang: str | None = None,
+        team_id: int | None = None,
+        kb_ids: list[int] | None = None,
     ) -> dict[str, Any]:
         """分析用户消息中的代码。
 
@@ -67,7 +176,11 @@ class CodeAnalysisService:
             raise ValueError("暂不支持该语言")
 
         structure = self.parser.parse_structure(code, language)
-        spec_text = SPEC_PLACEHOLDER
+        spec_text, spec_sources = await self.fetch_coding_spec(
+            team_id=team_id,
+            kb_ids=kb_ids,
+            language=language,
+        )
 
         human = HUMAN_PROMPT_TEMPLATE.format(
             language=language,
@@ -76,10 +189,11 @@ class CodeAnalysisService:
         )
 
         logger.info(
-            "代码分析开始 language=%s lines=%s funcs=%s",
+            "代码分析开始 language=%s lines=%s funcs=%s has_spec=%s",
             language,
             structure.get("line_count"),
             len(structure.get("functions") or []),
+            spec_text != SPEC_PLACEHOLDER,
         )
 
         raw = await llm_client.chat(
@@ -89,6 +203,8 @@ class CodeAnalysisService:
         result = self.parser.parse_llm_response(raw)
         result["language"] = language
         result["structure"] = structure
+        result["spec_injected"] = spec_text != SPEC_PLACEHOLDER
+        result["sources"] = spec_sources
         result["disclaimer"] = "由 AI 生成，建议 Code Review 后使用"
         return result
 
@@ -99,14 +215,25 @@ class CodeAnalysisService:
         logic = str(result.get("logic_explanation") or "").strip() or "（无）"
         data_flow = str(result.get("data_flow") or "").strip() or "（无）"
         disclaimer = str(result.get("disclaimer") or "").strip()
-        structure = result.get("structure") if isinstance(result.get("structure"), dict) else {}
+        structure = (
+            result.get("structure")
+            if isinstance(result.get("structure"), dict)
+            else {}
+        )
 
         lines: list[str] = [
             f"## 代码解读（{language}）",
             "",
-            f"**功能概述**：{summary}",
-            "",
         ]
+        if result.get("spec_injected"):
+            lines.append("> 已对照团队知识库中的编码规范进行分析。")
+            lines.append("")
+        lines.extend(
+            [
+                f"**功能概述**：{summary}",
+                "",
+            ]
+        )
 
         funcs = structure.get("functions") or []
         classes = structure.get("classes") or []
