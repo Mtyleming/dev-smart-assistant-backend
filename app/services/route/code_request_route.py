@@ -1,37 +1,18 @@
-"""代码辅助路由策略：解读已接入，生成暂占位。"""
+"""代码辅助路由策略：解读 / 生成 / 改写分流。"""
 
 from __future__ import annotations
 
 import logging
-import re
 
 from app.services.code_analysis_service import code_analysis_service
+from app.services.code_generation_service import (
+    code_generation_service,
+    resolve_mode,
+)
 from app.services.code_parser import CodeParser
 from app.services.route.base import IntentRouteStrategy
 
 logger = logging.getLogger(__name__)
-
-# 明显「生成代码」类请求
-_GENERATE_KEYWORDS = (
-    "帮我写",
-    "帮我生成",
-    "请生成",
-    "生成一段",
-    "生成一个",
-    "生成代码",
-    "写一段",
-    "写一个",
-    "写个",
-    "实现一个",
-    "实现一段",
-    "给我写",
-    "创建一段",
-    "创建一个",
-)
-
-_GENERATE_RE = re.compile(
-    "|".join(re.escape(k) for k in _GENERATE_KEYWORDS),
-)
 
 
 class CodeRequestRouteStrategy(IntentRouteStrategy):
@@ -52,34 +33,88 @@ class CodeRequestRouteStrategy(IntentRouteStrategy):
         kb_ids: list[int] | None = None,
         content_type: str | None = None,
     ) -> dict:
-        """代码解读；生成类请求本期返回开发中提示。"""
+        """按子模式执行解读、生成或改写。"""
         code, fence_lang = self._parser.extract_code(
             message, content_type=content_type
         )
-        wants_generate = bool(_GENERATE_RE.search(message or ""))
+        mode = resolve_mode(message, has_code=bool(code))
 
-        # 有生成意图且抽不出代码 → 生成功能占位
-        if wants_generate and not code:
-            logger.info(
-                "code_request 生成占位 conversation_id=%s",
+        logger.info(
+            "code_request 分流 conversation_id=%s mode=%s code_len=%s "
+            "team_id=%s content_type=%s",
+            conversation_id,
+            mode,
+            len(code),
+            team_id,
+            content_type,
+        )
+
+        if mode in ("generate", "edit"):
+            return await self._run_generate(
+                message,
                 conversation_id,
+                team_id=team_id,
+                kb_ids=kb_ids,
+                content_type=content_type,
+                hint_mode=mode,
+            )
+
+        return await self._run_analyze(
+            message,
+            conversation_id,
+            code=code,
+            fence_lang=fence_lang,
+            team_id=team_id,
+            kb_ids=kb_ids,
+            content_type=content_type,
+        )
+
+    async def _run_generate(
+        self,
+        message: str,
+        conversation_id: int,
+        *,
+        team_id: int | None,
+        kb_ids: list[int] | None,
+        content_type: str | None,
+        hint_mode: str,
+    ) -> dict:
+        """生成 / 改写路径。"""
+        try:
+            result = await code_generation_service.generate(
+                message,
+                conversation_id,
+                team_id=team_id,
+                kb_ids=kb_ids,
+                content_type=content_type,
+                hint_mode=hint_mode,  # type: ignore[arg-type]
+            )
+            return result
+        except Exception as exc:
+            logger.exception(
+                "code_request 生成失败 conversation_id=%s: %s",
+                conversation_id,
+                exc,
             )
             return {
                 "intent": self.intent,
-                "status": "pending_generate",
-                "answer": "代码生成功能开发中，当前仅支持粘贴代码进行解读分析。",
+                "status": "error",
+                "answer": "代码生成暂时失败，请稍后重试。",
                 "sources": [],
             }
 
-        logger.info(
-            "code_request 解读执行 conversation_id=%s team_id=%s kb_ids=%s "
-            "content_type=%s code_len=%s",
-            conversation_id,
-            team_id,
-            kb_ids,
-            content_type,
-            len(code),
-        )
+    async def _run_analyze(
+        self,
+        message: str,
+        conversation_id: int,
+        *,
+        code: str,
+        fence_lang: str | None,
+        team_id: int | None,
+        kb_ids: list[int] | None,
+        content_type: str | None,
+    ) -> dict:
+        """解读路径（沿用现有分析服务）。"""
         try:
             result = await code_analysis_service.analyze(
                 message,
@@ -98,6 +133,7 @@ class CodeRequestRouteStrategy(IntentRouteStrategy):
                 "language": result.get("language"),
                 "structure": result.get("structure"),
                 "spec_injected": bool(result.get("spec_injected")),
+                "mode": "analyze",
             }
         except ValueError as exc:
             logger.info(

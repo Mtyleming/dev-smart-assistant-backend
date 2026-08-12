@@ -96,13 +96,15 @@ app/
 │   ├── code_assist_service.py
 │   ├── code_parser.py           # 抽代码 / 语言检测 / 轻量结构化
 │   ├── code_analysis_service.py # 代码解读编排（调 LLM）
+│   ├── code_generation_service.py # 代码生成/改写编排
+│   ├── code_safety_filter.py    # 生成结果安全过滤
 │   ├── doc_generator_service.py
 │   ├── route/               # 意图路由策略（策略模式）
 │   │   ├── base.py          # 策略接口
 │   │   ├── factory.py       # 按 intent 选择策略
 │   │   ├── knowledge_query_route.py  # 知识库查询 → rag（已接 RAG）
 │   │   ├── general_qa_route.py       # 通用问答 → general
-│   │   ├── code_request_route.py     # 代码辅助 → code（解读已接入）
+│   │   ├── code_request_route.py     # 代码辅助 → code（解读/生成/改写）
 │   │   └── doc_generation_route.py   # 文档生成 → doc
 │   └── ai/                  # AI 只出现在这里
 │       ├── llm_client.py    # 百炼大模型对话 / RAG 生成
@@ -110,6 +112,7 @@ app/
 │       ├── conversation_summary.py  # 对话历史摘要工具
 │       ├── intent_service.py        # 意图识别（四类意图）
 │       ├── intent_router.py         # LangGraph 四节点分发
+│       ├── code_generation_graph.py # 代码生成五节点流水线
 │       ├── rag_pipeline.py  # RAG 检索链路
 │       └── agent_graph.py   # LangGraph 状态机
 ├── repositories/            # 数据访问层：CRUD / 向量 / 缓存
@@ -912,7 +915,8 @@ summary = await summarize_messages(messages)
 - [x] Embedding 工具类抽离（`embedding_service`，上传与 RAG 查询共用 `text-embedding-v4`）  
 - [x] RAG 检索链路（向量 Top5 → gte-rerank Top3 → 置信度 → 上下文组装 → 生成）  
 - [x] 意图识别（`intent_service`）+ LangGraph 四节点路由（`intent_router`）  
-- [x] 意图路由策略（`knowledge_query` 已接 RAG；`code_request` 已接代码解读；其余仍为占位）  
+- [x] 意图路由策略（`knowledge_query` 已接 RAG；`code_request` 已接解读 + 生成/改写；其余仍为占位）  
+- [x] 代码生成五节点流水线（意图解析 → 规范注入 → 生成 → 安全过滤 → 格式化）  
 
 ### 意图识别与路由（当前）
 
@@ -922,31 +926,40 @@ summary = await summarize_messages(messages)
 |------|----------------|--------|------|
 | `knowledge_query` | `rag` | `KnowledgeQueryRouteStrategy` | 已接入 RAG 知识库查询 |
 | `general_qa` | `general` | `GeneralQaRouteStrategy` | 通用技术问答（占位） |
-| `code_request` | `code` | `CodeRequestRouteStrategy` | **代码解读已接入**（含规范检索）；生成仍占位 |
+| `code_request` | `code` | `CodeRequestRouteStrategy` | **解读 / 生成 / 改写已接入** |
 | `doc_generation` | `doc` | `DocGenerationRouteStrategy` | 生成技术文档（占位） |
 
 - API Key：使用 `.env` 的 `DASHSCOPE_API_KEY`（对应 `settings.llm_api_key`）  
 - 意图置信度 `< 0.7` 或解析失败时，回退为 `general_qa`  
 - 识别结果缓存 Redis：`intent:{conversation_id}:{msg_hash}`，TTL 300 秒  
 - `IntentState` 可传 `team_id`、`kb_ids`（空列表 = 查团队下全部知识库）、`content_type`（代码辅助用）  
-- **chat 已接入**：`POST /api/v1/messages/chat` 会先意图识别；`knowledge_query` 走 RAG（含引用校验与 `sources` 落库），`code_request` 走代码解读，其它意图走通用对话  
+- **chat 已接入**：`POST /api/v1/messages/chat` 会先意图识别；`knowledge_query` 走 RAG，`code_request` 走代码辅助（解读/生成/改写），其它意图走通用对话  
 
-### 代码辅助 · 解读（当前）
+### 代码辅助 · 子模式与生成
 
-当意图为 `code_request` 时：
+顶层意图仍为 `code_request`。进入 [`CodeRequestRouteStrategy`](app/services/route/code_request_route.py) 后，用「能否抽出代码 + 关键词」判定子模式：
 
-1. **子能力判断**：消息含「帮我写 / 生成 / 实现一个」等且抽不出代码 → 返回「代码生成功能开发中」  
-2. **解读路径**：提取代码 → 检测语言 → 轻量结构化 → **检索团队知识库编码规范并注入提示词** → 大模型 JSON 分析 → 格式化为 Markdown  
-3. 规范命中时：`sources` 返回规范切片（含正文，`kind=coding_spec`）；回复中会提示「已对照团队知识库中的编码规范」  
-4. SSE 仍发 `delta`（整段结果按块切分推送）与 `final`  
+| 子模式 | 判定 | 行为 |
+|--------|------|------|
+| `analyze` | 有代码，且是解读/审查类诉求 | [`code_analysis_service`](app/services/code_analysis_service.py) |
+| `generate` | 无参考代码 | [`code_generation_graph`](app/services/ai/code_generation_graph.py) 五节点 |
+| `edit` | 有参考代码，且是改写/补全/重构类诉求 | 同上五节点，参考代码注入提示词 |
 
-限制：
+**生成/改写五节点：**
 
-- 单次代码不超过 **2000 行**  
-- 规范检索沿用 RAG 置信度门控：低置信度视为未命中，提示词写「未检测到团队编码规范」  
-- **代码生成**尚未实现  
+1. **intent_parse**：抽参考代码；LLM 解析 `language` / `framework` / `design_pattern` / `requirements`  
+2. **spec_inject**：按 `team_id`（及可选 `kb_ids`）检索团队编码规范并注入  
+3. **code_generate**：规范写入 System Prompt，生成 JSON（`code` / `usage` / `dependencies`）  
+4. **safety_filter**：禁止硬编码密钥、危险调用（`os.system` / `eval` / `exec` 等），命中则脱敏或注释  
+5. **format_output**：输出 Markdown（代码围栏 + 使用说明 + 依赖说明 + AI 生成声明）
 
-相关文件：`app/services/code_parser.py`、`app/services/code_analysis_service.py`、`app/services/route/code_request_route.py`。
+本地单测（不调真 LLM）：
+
+```bash
+python test/test_code_generation.py
+```
+
+相关文件：`code_parser.py`、`code_analysis_service.py`、`code_generation_service.py`、`code_safety_filter.py`、`ai/code_generation_graph.py`、`route/code_request_route.py`。
 
 ### RAG 知识库查询流程
 
@@ -1025,13 +1038,12 @@ python test/test_intent_classify.py --ask
 ### 建议下一步
 
 1. 配好本机 MySQL，用 Alembic 做正式建表迁移  
-2. 补全 `general` / `doc` 策略，以及代码**生成**链路  
-3. 代码解读接入团队编码规范检索（知识库）  
-4. 与前端联调：消费 `sources`、`citation_verified` 事件展示引用  
+2. 补全 `general` / `doc` 策略的真实 run 逻辑  
+3. 与前端联调：消费 `sources`、`citation_verified` 事件；展示代码生成的安全过滤提示  
 
 ### 已知注意点
 
-- `knowledge_query` 已接 RAG；`code_request` **解读已接入**（含团队编码规范检索注入；生成仍占位）；`general` / `doc` 策略仍为占位  
+- `knowledge_query` 已接 RAG；`code_request` **解读 + 生成/改写已接入**；`general` / `doc` 策略仍为占位  
 - chat 对 `code_request` 会调用 `CodeRequestRouteStrategy`；粘贴代码请用 Markdown 围栏或 `content_type: "code"`  
 - 文档上传已完成切块与 Embedding 入库；知识库/文档删除会清理对应 Milvus 向量（Collection 不存在时跳过清理）  
 - 若 chat 报未知列 `sources`，请先执行 `scripts/add_messages_sources.sql` 或 `scripts/migrate_messages_sources.py`  
