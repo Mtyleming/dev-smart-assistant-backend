@@ -83,7 +83,7 @@ app/
 │   ├── messages.py
 │   ├── chat.py
 │   ├── code_assist.py
-│   ├── doc_generator.py
+│   ├── docs.py                 # 文档生成 / 模板 CRUD
 │   └── health.py
 ├── services/                # 服务层：业务逻辑 + AI 编排
 │   ├── user_service.py
@@ -98,7 +98,7 @@ app/
 │   ├── code_analysis_service.py # 代码解读编排（调 LLM）
 │   ├── code_generation_service.py # 代码生成/改写编排
 │   ├── code_safety_filter.py    # 生成结果安全过滤
-│   ├── doc_generator_service.py
+│   ├── doc_generator_service.py  # 文档生成编排 + 模板 CRUD
 │   ├── route/               # 意图路由策略（策略模式）
 │   │   ├── base.py          # 策略接口
 │   │   ├── factory.py       # 按 intent 选择策略
@@ -115,6 +115,9 @@ app/
 │       ├── code_generation_graph.py # 代码生成五节点流水线
 │       ├── rag_pipeline.py  # RAG 检索链路
 │       └── agent_graph.py   # LangGraph 状态机
+├── templateDoc/             # 文档生成核心（内置模板 / Prompt / 导出）
+│   ├── template.py          # 模板加载、风格注入、通义千问生成
+│   └── docExport.py         # Markdown → HTML / PDF
 ├── repositories/            # 数据访问层：CRUD / 向量 / 缓存
 ├── models/                  # SQLAlchemy 表模型
 └── schemas/                 # Pydantic 请求/响应模型
@@ -145,7 +148,7 @@ app/
 | 发起对话 | `/api/v1/message` | `POST /chat` 发送消息并获取回复 |
 | 智能问答 | `/api/v1/chat` | `POST /ask` 发起问答 |
 | 代码辅助 | `/api/v1/code-assist` | `POST /assist` |
-| 文档生成 | `/api/v1/doc-generator` | `POST /generate` |
+| 文档生成 | `/api/v1/docs` | 生成、导出、模板 CRUD |
 
 每个业务模块都提供了 `GET .../status`，用来确认路由已就绪。
 
@@ -792,6 +795,156 @@ source scripts/create_document_chunks.sql
 - 向量清理失败时返回 `503`，message 为「向量数据清理失败，文档未删除」，MySQL 记录不变  
 - 成功响应 `message` 为「删除成功」
 
+### 文档生成
+
+根据选定的文档类型和输入内容（代码或自然语言），加载 Prompt 模板、检索团队知识库中的同类文档作为写作风格参考，调用通义千问生成 Markdown，并在文首加上「由 AI 生成，建议人工审阅后发布」。
+
+正式接口前缀为 **`/api/v1/docs`**（需登录）。模板按 Token 当前 `team_id` 隔离。
+
+处理流程：
+
+1. 按 `team_id + 文档类型` 加载模板：**团队自定义优先** → 库内系统内置 → 代码默认模板  
+2. 用知识库 RAG 检索同类文档切片（Top2）作为风格参考；未命中则使用通用技术文档风格  
+3. 构造 Prompt：模板结构 + 风格参考 + 输入内容，调用通义千问  
+4. 在生成结果顶部加上 AI 声明后返回 Markdown  
+5. 可再调用导出接口，把 Markdown 转为 HTML 或 PDF 文件下载  
+
+相关环境变量：`.env` 中的 `DASHSCOPE_API_KEY`（通义千问）、以及知识库检索用的 Milvus / Embedding 配置。
+
+表 `document_templates` 以 `(team_id, name)` 唯一（约束名 `uk_team_name`），同一团队不能重名，但同一文档类型可以有多份模板。库内模板占位符使用 `{{name}}` 双花括号。
+
+若已有 `document_templates` 表但没有 `version` 列，或还没有历史版本表，或历史表字符集不是 `utf8mb4`，请执行：
+
+```bash
+$env:PYTHONPATH="."
+python scripts/migrate_document_templates.py
+```
+
+导出 HTML/PDF 依赖 `markdown`、`xhtml2pdf`（已写入 `requirements.txt`）。Windows 上 PDF 中文依赖本机字体（如黑体 `simhei.ttf`）；若 PDF 乱码，可改导出 HTML。
+
+#### 生成文档 `POST /api/v1/docs/generate`
+
+权限：当前团队任意成员。请求体：
+
+```json
+{
+  "doc_type": "api_doc",
+  "input_content": "用户登录接口：POST /api/v1/auth/login，参数 number、password",
+  "is_code": false,
+  "knowledge_base_id": 1,
+  "template_id": 1
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `doc_type` | 必填。`api_doc` / `module_doc` / `changelog` / `getting_started` / `custom` |
+| `input_content` | 必填。代码片段或自然语言描述 |
+| `is_code` | 可选，默认 `false`。为 `true` 时按代码内容注入 Prompt |
+| `knowledge_base_id` | 可选。指定则只从该知识库检索风格；不传则查当前团队全部知识库 |
+| `template_id` | 可选。指定本团队自定义模板或系统内置模板的 ID；不传则按类型自动选择（同类型有多份时用最近更新的一份） |
+
+成功响应 `data` 示例：
+
+```json
+{
+  "content": "> 由 AI 生成，建议人工审阅后发布\n\n## 接口说明\n...",
+  "doc_type": "api_doc",
+  "template_source": "custom",
+  "style_used": true
+}
+```
+
+- `template_source`：`custom`（团队自定义）/ `builtin_db`（库内内置）/ `builtin_code`（代码默认）  
+- `style_used`：是否注入了知识库风格参考  
+- 未配置 `DASHSCOPE_API_KEY` 时仍会返回带声明头的占位正文  
+- 大模型调用失败返回 `503`
+
+#### 导出文档 `POST /api/v1/docs/export`
+
+权限：当前团队任意成员。提交 Markdown，**直接返回文件流**（不是 JSON）。请求体：
+
+```json
+{
+  "content": "> 由 AI 生成，建议人工审阅后发布\n\n## 接口说明\n...",
+  "format": "html",
+  "doc_type": "api_doc"
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `content` | 必填。Markdown 正文 |
+| `format` | 必填。`html` / `pdf` / `markdown` |
+| `doc_type` | 可选，用于下载文件名，默认 `document` |
+
+响应头 `Content-Disposition: attachment`，按格式返回 `.html` / `.pdf` / `.md`。不支持的 `format` 返回 `400`。
+
+#### 获取模板列表 `GET /api/v1/docs/templates`
+
+权限：当前团队任意成员。无查询参数。
+
+成功响应 `data` 为数组，包含**本团队自定义模板**和**系统内置模板**：
+
+```json
+[
+  {
+    "id": 3,
+    "name": "前端组周报模板",
+    "type": "custom",
+    "content": "# 前端组周报...",
+    "team_id": 1,
+    "is_builtin": false,
+    "version": 1,
+    "created_by": 1,
+    "created_at": "2026-08-14T10:00:00",
+    "updated_at": "2026-08-14T10:00:00"
+  }
+]
+```
+
+#### 创建模板 `POST /api/v1/docs/templates`
+
+权限：**admin** 或 **tech_lead**。请求体：
+
+```json
+{
+  "name": "登录接口文档模板",
+  "type": "api_doc",
+  "content": "## 接口说明\n{{summary}}\n"
+}
+```
+
+成功响应 `201`，`data` 示例：`{"id": 4, "version": 1}`，`message` 为「创建成功」。
+
+- 同团队名称重复时返回 `409`，message 为「同团队已存在同名模板」  
+- 开发者调用返回 `403`
+
+#### 更新模板 `PUT /api/v1/docs/templates/{template_id}`
+
+权限：**admin** 或 **tech_lead**。请求体字段均可选，但至少提供一个：
+
+```json
+{
+  "name": "新名称",
+  "type": "api_doc",
+  "content": "## 新结构\n{{summary}}\n"
+}
+```
+
+- 只可更新**当前团队的自定义模板**；系统内置模板返回 `403`「系统内置模板不可修改或删除」  
+- 跨团队或不存在返回 `404`  
+- 更新前把旧内容写入 `document_template_versions`，并将 `version` +1  
+- 成功响应 `message` 为「更新成功」，`data` 为更新后的模板对象（含新 `version`）
+
+#### 删除模板 `DELETE /api/v1/docs/templates/{template_id}`
+
+权限：**admin** 或 **tech_lead**。
+
+- 只可删除当前团队自定义模板；内置模板返回 `403`  
+- 历史版本随外键 CASCADE 一并删除  
+- 成功响应 `message` 为「删除成功」
+
 ### 发起对话 `POST /api/v1/messages/chat`
 
 请求头需携带 `Authorization: Bearer <access_token>`。
@@ -915,8 +1068,9 @@ summary = await summarize_messages(messages)
 - [x] Embedding 工具类抽离（`embedding_service`，上传与 RAG 查询共用 `text-embedding-v4`）  
 - [x] RAG 检索链路（向量 Top5 → gte-rerank Top3 → 置信度 → 上下文组装 → 生成）  
 - [x] 意图识别（`intent_service`）+ LangGraph 四节点路由（`intent_router`）  
-- [x] 意图路由策略（`knowledge_query` 已接 RAG；`code_request` 已接解读 + 生成/改写；其余仍为占位）  
+- [x] 意图路由策略（`knowledge_query` 已接 RAG；`code_request` 已接解读 + 生成/改写；`doc_generation` 已接文档生成；`general` 仍为占位）  
 - [x] 代码生成五节点流水线（意图解析 → 规范注入 → 生成 → 安全过滤 → 格式化）  
+- [x] 文档生成（`/api/v1/docs`：生成 Markdown、导出 HTML/PDF、模板 CRUD 与版本管理；chat 的 `doc_generation` 已接入）  
 
 ### 意图识别与路由（当前）
 
@@ -927,13 +1081,13 @@ summary = await summarize_messages(messages)
 | `knowledge_query` | `rag` | `KnowledgeQueryRouteStrategy` | 已接入 RAG 知识库查询 |
 | `general_qa` | `general` | `GeneralQaRouteStrategy` | 通用技术问答（占位） |
 | `code_request` | `code` | `CodeRequestRouteStrategy` | **解读 / 生成 / 改写已接入** |
-| `doc_generation` | `doc` | `DocGenerationRouteStrategy` | 生成技术文档（占位） |
+| `doc_generation` | `doc` | `DocGenerationRouteStrategy` | **已接入**：模板 + 知识库风格 + 通义千问，返回带声明头的 Markdown |
 
 - API Key：使用 `.env` 的 `DASHSCOPE_API_KEY`（对应 `settings.llm_api_key`）  
 - 意图置信度 `< 0.7` 或解析失败时，回退为 `general_qa`  
 - 识别结果缓存 Redis：`intent:{conversation_id}:{msg_hash}`，TTL 300 秒  
 - `IntentState` 可传 `team_id`、`kb_ids`（空列表 = 查团队下全部知识库）、`content_type`（代码辅助用）  
-- **chat 已接入**：`POST /api/v1/messages/chat` 会先意图识别；`knowledge_query` 走 RAG，`code_request` 走代码辅助（解读/生成/改写），其它意图走通用对话  
+- **chat 已接入**：`POST /api/v1/messages/chat` 会先意图识别；`knowledge_query` 走 RAG，`code_request` 走代码辅助（解读/生成/改写），`doc_generation` 走文档生成，其它意图走通用对话  
 
 ### 代码辅助 · 子模式与生成
 
@@ -1038,20 +1192,22 @@ python test/test_intent_classify.py --ask
 ### 建议下一步
 
 1. 配好本机 MySQL，用 Alembic 做正式建表迁移  
-2. 补全 `general` / `doc` 策略的真实 run 逻辑  
-3. 与前端联调：消费 `sources`、`citation_verified` 事件；展示代码生成的安全过滤提示  
+2. 补全 `general` 策略的真实 run 逻辑  
+3. 与前端联调：消费 `sources`、`citation_verified` 事件；展示代码生成的安全过滤提示；对接 `/api/v1/docs` 生成与导出  
 
 ### 已知注意点
 
-- `knowledge_query` 已接 RAG；`code_request` **解读 + 生成/改写已接入**；`general` / `doc` 策略仍为占位  
+- `knowledge_query` 已接 RAG；`code_request` **解读 + 生成/改写已接入**；`doc_generation` **已接入文档生成**；`general` 策略仍为占位  
 - chat 对 `code_request` 会调用 `CodeRequestRouteStrategy`；粘贴代码请用 Markdown 围栏或 `content_type: "code"`  
+- chat 对 `doc_generation` 会按关键词推断文档类型（接口→`api_doc`、变更日志→`changelog`、入门/README→`getting_started`，否则 `module_doc`）；指定类型请走 `POST /api/v1/docs/generate`  
+- 文档模板表 `document_templates` 以 `(team_id, name)` 唯一；生成时可传 `template_id` 指定模板。缺 `version` 列、缺历史表、或历史表不是 `utf8mb4` 时，请执行 `scripts/migrate_document_templates.py`  
 - 文档上传已完成切块与 Embedding 入库；知识库/文档删除会清理对应 Milvus 向量（Collection 不存在时跳过清理）  
 - 若 chat 报未知列 `sources`，请先执行 `scripts/add_messages_sources.sql` 或 `scripts/migrate_messages_sources.py`  
 - 扫描版 PDF（纯图片）可能解析出空文本，需后续 OCR 增强；空文本会跳过向量写入  
 - **文档上传返回 503「文档向量化失败」**：多半不是 Milvus 坏了，而是调用百炼 Embedding 时走了本机代理（如 `127.0.0.1:7897`）却连不上。`embedding_service` 已对百炼请求设置 `trust_env=False`（直连、忽略系统代理）。若仍失败：① 确认能访问 `dashscope.aliyuncs.com`；② 检查 `.env` 的 `DASHSCOPE_API_KEY`；③ 失败文档需重新上传（当前无单独「重新向量化」接口）  
 - 启动健康检查与各模块 `/status` **不依赖** MySQL；带 `DbSession` 的接口在真正执行 SQL 前一般也不会立刻连库，但正式业务开发前请先配好 `.env` 中的 `DATABASE_URL`  
 - Python 本机若是 3.13，满足「3.12+」要求；团队若统一 3.12，可在虚拟环境中指定 3.12 解释器  
-- 若启动报 `ModuleNotFoundError`，请在已激活的 `.venv` 中执行 `pip install -r requirements.txt`。对话相关还依赖 `langchain-core`、`langchain-qwq`、`langgraph`、`openai`、`dashscope`；文档切片依赖 `langchain-text-splitters`、`tiktoken`；文档解析依赖 `pypdf`、`python-docx`  
+- 若启动报 `ModuleNotFoundError`，请在已激活的 `.venv` 中执行 `pip install -r requirements.txt`。对话相关还依赖 `langchain-core`、`langchain-qwq`、`langgraph`、`openai`、`dashscope`；文档切片依赖 `langchain-text-splitters`、`tiktoken`；文档解析依赖 `pypdf`、`python-docx`；文档导出依赖 `markdown`、`xhtml2pdf`  
 - **Cursor 全局 MySQL MCP**：已在 `%USERPROFILE%\.cursor\mcp.json` 配置 `@kyruntime/mysql-mcp`，连接本机 `127.0.0.1:3306`（默认库 `dev_assistant`）。修改账号后需在 Cursor 的 **Settings → MCP** 里刷新/重启该服务；写操作默认关闭（只读查询更安全）
 
 ---

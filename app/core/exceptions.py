@@ -42,6 +42,13 @@ class ForbiddenError(AppException):
         super().__init__(code=40300, message=message, status_code=403)
 
 
+class UnsupportedFormatError(AppException):
+    """不支持的导出格式。"""
+
+    def __init__(self, message: str = "不支持的导出格式"):
+        super().__init__(code=40001, message=message, status_code=400)
+
+
 async def app_exception_handler(request: Request, exc: AppException):
     """全局业务异常处理器，返回统一 JSON 结构。"""
     _ = request

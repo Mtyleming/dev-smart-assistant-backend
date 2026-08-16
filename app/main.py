@@ -17,6 +17,7 @@ from app.routers import (
     admin,
     auth,
     conversations,
+    docs,
     health,
     knowledge_bases,
     messages,
@@ -111,4 +112,5 @@ app.include_router(teams.router)
 app.include_router(conversations.router)
 app.include_router(messages.router)
 app.include_router(knowledge_bases.router)
+app.include_router(docs.router)
 app.include_router(admin.router)

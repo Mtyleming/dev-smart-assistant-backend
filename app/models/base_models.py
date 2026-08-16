@@ -9,6 +9,8 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
+    Integer,
     JSON,
     String,
     Text,
@@ -62,6 +64,16 @@ class DocumentStatus(str, enum.Enum):
     failed = "failed"
     deleting = "deleting"
     deleted = "deleted"
+
+
+class DocumentTemplateType(str, enum.Enum):
+    """文档模板类型，对应 document_templates.type。"""
+
+    api_doc = "api_doc"
+    module_doc = "module_doc"
+    changelog = "changelog"
+    getting_started = "getting_started"
+    custom = "custom"
 
 
 class Team(Base):
@@ -313,3 +325,105 @@ class Message(Base):
     )
 
     conversation = relationship("Conversation", back_populates="messages")
+
+
+class DocumentTemplate(Base):
+    """文档生成模板：按 team_id 隔离；team_id 为空且 is_builtin=1 为系统内置。
+
+    与本地 document_templates 表对齐：
+    - 唯一约束 uk_team_name (team_id, name)，同一团队不能重名
+    - 同一类型允许有多份不同名称的模板
+    - team_id 删除级联；created_by 删除置空
+    """
+
+    __tablename__ = "document_templates"
+    __table_args__ = (
+        UniqueConstraint("team_id", "name", name="uk_team_name"),
+        Index("idx_team_id", "team_id"),
+        Index("idx_type", "type"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    type: Mapped[DocumentTemplateType] = mapped_column(
+        Enum(
+            DocumentTemplateType,
+            values_callable=lambda types: [item.value for item in types],
+            native_enum=True,
+        ),
+        nullable=False,
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    team_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "teams.id",
+            ondelete="CASCADE",
+            onupdate="CASCADE",
+            name="fk_tmpl_team",
+        ),
+        nullable=True,
+    )
+    is_builtin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0"
+    )
+    created_by: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "users.id",
+            ondelete="SET NULL",
+            onupdate="CASCADE",
+            name="fk_tmpl_creator",
+        ),
+        nullable=True,
+    )
+    # 每次更新自定义模板时 +1；内置模板保持 1
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        server_onupdate=func.now(),
+    )
+
+    versions = relationship(
+        "DocumentTemplateVersion",
+        back_populates="template",
+        cascade="all, delete-orphan",
+    )
+
+
+class DocumentTemplateVersion(Base):
+    """模板历史快照：更新前把当前内容写入此表，便于回看旧版本。"""
+
+    __tablename__ = "document_template_versions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    template_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("document_templates.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    type: Mapped[DocumentTemplateType] = mapped_column(
+        Enum(
+            DocumentTemplateType,
+            values_callable=lambda types: [item.value for item in types],
+            native_enum=True,
+        ),
+        nullable=False,
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    team_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+
+    template = relationship("DocumentTemplate", back_populates="versions")

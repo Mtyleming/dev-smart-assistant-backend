@@ -229,6 +229,21 @@ class ChatService:
                 sources = []
             return answer, sources, intent
 
+        if intent == "doc_generation":
+            strategy = get_route_strategy("doc_generation")
+            result = await strategy.run(
+                question,
+                conversation_id,
+                team_id=team_id,
+                kb_ids=kb_ids,
+                content_type=content_type,
+            )
+            answer = str(result.get("answer") or "").strip()
+            sources = result.get("sources")
+            if sources is None:
+                sources = []
+            return answer, sources, intent
+
         # 其它意图：沿用通用对话（含长上下文摘要）
         system_prompt, llm_context = await self._build_system_prompt(context)
         answer = await llm_client.chat(llm_context, system_prompt=system_prompt)
@@ -317,6 +332,28 @@ class ChatService:
 
         if intent == "code_request":
             strategy = get_route_strategy("code_request")
+            result = await strategy.run(
+                question,
+                conversation_id,
+                team_id=team_id,
+                kb_ids=kb_ids,
+                content_type=content_type,
+            )
+            answer = str(result.get("answer") or "").strip()
+            sources = result.get("sources")
+            if sources is None:
+                sources = []
+            for piece in _chunk_text(answer):
+                yield "delta", {"content": piece}
+            yield "final", {
+                "content": answer,
+                "sources": sources,
+                "intent": intent,
+            }
+            return
+
+        if intent == "doc_generation":
+            strategy = get_route_strategy("doc_generation")
             result = await strategy.run(
                 question,
                 conversation_id,

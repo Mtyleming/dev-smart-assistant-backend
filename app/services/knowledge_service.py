@@ -1,5 +1,9 @@
 """知识库业务逻辑（含文档上传/查询/删除）。"""
 
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import UploadFile
@@ -7,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AppException, ConflictError, NotFoundError
+from app.services.ai.rag_pipeline import rag_pipeline
 from app.core.file_storage import (
     build_relative_path,
     resolve_file_type,
@@ -34,6 +39,27 @@ from app.schemas.knowledge import (
     KnowledgeUpdateRequest,
 )
 from app.services.document_parser import DocumentParseError, parse_document
+
+logger = logging.getLogger(__name__)
+
+# 按文档类型构造风格检索查询
+_DOC_STYLE_QUERIES: dict[str, str] = {
+    "api_doc": "API 接口文档 请求方法 请求参数 响应示例 错误码 接口说明",
+    "module_doc": "模块说明文档 功能概述 核心功能 依赖关系 使用示例",
+    "changelog": "变更日志 changelog 版本更新 变更详情 影响范围",
+    "getting_started": "快速开始 入门指南 安装步骤 环境要求 常见问题 README",
+    "custom": "技术文档 写作风格 文档结构 章节标题",
+}
+
+
+@dataclass
+class SimilarDocRef:
+    """知识库检索到的同类文档切片，供文档生成作风格参考。"""
+
+    content: str
+    document_id: int | None = None
+    chunk_index: int | None = None
+    score: float | None = None
 
 
 def _to_item(kb: KnowledgeBase) -> KnowledgeItem:
@@ -372,6 +398,64 @@ class KnowledgeService:
         )
         await document_repo.soft_delete(db, doc)
         await db.commit()
+
+    async def search_similar_docs(
+        self,
+        team_id: int,
+        doc_type: str,
+        top_k: int = 2,
+        kb_ids: list[int] | None = None,
+        extra_query: str | None = None,
+    ) -> list[SimilarDocRef]:
+        """检索团队知识库中的同类文档切片，提取写作风格参考。
+
+        风格检索不强制高置信度：即使 RAG 判定为 low，仍可取 Top 切片作参考。
+        """
+        base = _DOC_STYLE_QUERIES.get(str(doc_type), _DOC_STYLE_QUERIES["custom"])
+        extra = (extra_query or "").strip()
+        query = f"{base}\n{extra}" if extra else base
+        try:
+            retrieved = await rag_pipeline.retrieve(
+                query,
+                team_id=int(team_id),
+                kb_ids=list(kb_ids or []),
+            )
+        except Exception as exc:
+            logger.warning(
+                "检索同类文档失败 team_id=%s doc_type=%s: %s",
+                team_id,
+                doc_type,
+                exc,
+            )
+            return []
+
+        chunks = list(retrieved.get("chunks") or [])[: max(1, int(top_k))]
+        refs: list[SimilarDocRef] = []
+        for chunk in chunks:
+            content = str(chunk.get("content") or "").strip()
+            if not content:
+                continue
+            score_raw = chunk.get("score")
+            try:
+                score = float(score_raw) if score_raw is not None else None
+            except (TypeError, ValueError):
+                score = None
+            refs.append(
+                SimilarDocRef(
+                    content=content,
+                    document_id=chunk.get("document_id"),
+                    chunk_index=chunk.get("chunk_index"),
+                    score=score,
+                )
+            )
+        logger.info(
+            "风格检索完成 team_id=%s doc_type=%s hits=%s confidence=%s",
+            team_id,
+            doc_type,
+            len(refs),
+            retrieved.get("confidence"),
+        )
+        return refs
 
 
 knowledge_service = KnowledgeService()
